@@ -3,7 +3,8 @@
 
 usage: ./merge_lora.py model.safetensors lora.safetensors|none out.safetensors [strength=1.0]
 "none" only converts the model to f16 (e.g. the official bf16 Anima Turbo).
-LoRA keys "diffusion_model.X.lora_{A,B}.weight" patch model key "net.X.weight": W += strength * alpha/rank * B @ A
+LoRA keys "diffusion_model.X.lora_{A,B}.weight" patch model key "net.X.weight" (or "model.diffusion_model.X.weight"):
+W += strength * alpha/rank * B @ A
 (alpha/rank = 1 without an .alpha key).
 Streams tensor by tensor, so RAM use stays around the size of the largest tensor.
 """
@@ -49,7 +50,9 @@ def main():
         out.write(struct.pack("<Q", len(blob)) + blob)
         for k in names:
             w = load(mf, mbase, mh[k])
-            lk = "diffusion_model." + k[len("net."):-len(".weight")] if k.startswith("net.") and k.endswith(".weight") else None
+            # model keys are "net.X" or, in ComfyUI-style files, "model.diffusion_model.X"
+            pre = next((p for p in ("net.", "model.diffusion_model.") if k.startswith(p)), None)
+            lk = "diffusion_model." + k[len(pre):-len(".weight")] if pre and k.endswith(".weight") else None
             down, up = (".lora_A.weight", ".lora_B.weight") if lk and lk + ".lora_A.weight" in lh else (".lora_down.weight", ".lora_up.weight")
             if lk and lk + down in lh:
                 a = load(lf, lbase, lh[lk + down])
