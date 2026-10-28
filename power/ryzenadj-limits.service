@@ -1,0 +1,7 @@
+[Unit]
+Description=Raise APU power limits (RyzenAdj: STAPM/slow 25 W, fast 30 W, Tctl 90 C)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ryzenadj --stapm-limit=25000 --slow-limit=25000 --fast-limit=30000 --tctl-temp=90
+StandardOutput=null

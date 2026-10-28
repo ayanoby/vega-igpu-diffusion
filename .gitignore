@@ -1,0 +1,14 @@
+build-src/
+deps/
+tools/bin-opt-sd-cli
+tools/bin-opt-sd-server
+anima/models/
+anima/lora/
+anima/loras/
+anima/out/
+sdxl/models/
+gui/data/
+*.safetensors
+*.gguf
+*.part
+__pycache__/

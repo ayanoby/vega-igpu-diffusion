@@ -1,0 +1,2631 @@
+diff --git a/src/ggml-vulkan/ggml-vulkan-common.h b/src/ggml-vulkan/ggml-vulkan-common.h
+index 66b7557..71b69e1 100644
+--- a/src/ggml-vulkan/ggml-vulkan-common.h
++++ b/src/ggml-vulkan/ggml-vulkan-common.h
+@@ -94,7 +94,7 @@ void deferred_memset(void * dst, uint32_t val, size_t size, std::vector<vk_stagi
+ 
+ // matmul
+ vk_pipeline ggml_vk_get_to_fp16(ggml_backend_vk_context * ctx, ggml_type type);
+-void ggml_vk_matmul(ggml_backend_vk_context * ctx, vk_context& subctx, vk_pipeline& pipeline, vk_subbuffer&& a, vk_subbuffer&& b, vk_subbuffer&& d, vk_subbuffer&& split_k_buffer, uint32_t m, uint32_t n, uint32_t k, uint32_t stride_a, uint32_t stride_b, uint32_t stride_d, uint32_t batch_stride_a, uint32_t batch_stride_b, uint32_t batch_stride_d, uint32_t split_k, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3, uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes);
++void ggml_vk_matmul(ggml_backend_vk_context * ctx, vk_context& subctx, vk_pipeline& pipeline, vk_subbuffer&& a, vk_subbuffer&& b, vk_subbuffer&& d, vk_subbuffer&& split_k_buffer, uint32_t m, uint32_t n, uint32_t k, uint32_t stride_a, uint32_t stride_b, uint32_t stride_d, uint32_t batch_stride_a, uint32_t batch_stride_b, uint32_t batch_stride_d, uint32_t split_k, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3, uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes, const vk_subbuffer * bias = nullptr, uint32_t bias_div = 1, uint32_t bias_len = 0);
+ bool ggml_vk_dim01_contiguous(const ggml_tensor * tensor);
+ vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * src, const ggml_tensor * dst, ggml_type to);
+ vk_pipeline ggml_vk_get_quantize_pipeline(ggml_backend_vk_context * ctx, ggml_type type);
+diff --git a/src/ggml-vulkan/ggml-vulkan-push-constants.h b/src/ggml-vulkan/ggml-vulkan-push-constants.h
+index 14062ee..12f163d 100644
+--- a/src/ggml-vulkan/ggml-vulkan-push-constants.h
++++ b/src/ggml-vulkan/ggml-vulkan-push-constants.h
+@@ -13,6 +13,8 @@ struct vk_mat_mat_push_constants {
+     uint32_t k_split;
+     uint32_t ne02; uint32_t ne12; uint32_t broadcast2; uint32_t broadcast3;
+     uint32_t padded_N;
++    uint32_t bias_base; uint32_t bias_div; uint32_t bias_len;
++    uint32_t epi;
+ };
+ 
+ struct vk_mat_vec_push_constants {
+@@ -472,6 +474,12 @@ struct vk_op_rope_apply_push_constants {
+ 
+ static_assert(sizeof(vk_op_rope_apply_push_constants) == 64, "rope_apply push constant layout mismatch");
+ 
++struct vk_op_rms_norm_rope_apply_push_constants {
++    vk_op_rope_apply_push_constants rope;
++    uint32_t w_offset;
++    float eps;
++};
++
+ struct vk_op_rope_push_constants {
+     uint32_t rope_mode;
+     uint32_t nrows;
+diff --git a/src/ggml-vulkan/ggml-vulkan-types.h b/src/ggml-vulkan/ggml-vulkan-types.h
+index 3d71a8b..fdd6124 100644
+--- a/src/ggml-vulkan/ggml-vulkan-types.h
++++ b/src/ggml-vulkan/ggml-vulkan-types.h
+@@ -622,6 +622,7 @@ enum rms_norm_mode {
+     RMS_NORM_MUL_ROPE,
+     RMS_NORM_MUL_ROPE_VIEW_SET_ROWS,
+     RMS_NORM_VIEW_SET_ROWS,
++    RMS_NORM_MUL_ROPE_APPLY,
+     RMS_NORM_COUNT,
+ };
+ 
+@@ -849,8 +850,11 @@ struct vk_device_struct {
+     vk_pipeline pipeline_set_rows_i64[2][GGML_TYPE_COUNT];
+     vk_pipeline pipeline_norm_f32;
+     vk_pipeline pipeline_group_norm_f32;
++    vk_pipeline pipeline_group_norm_mul_add_f32;
++    vk_pipeline pipeline_norm_mul_add_f32;
+     vk_pipeline pipeline_rms_norm_f32;
+     vk_pipeline pipeline_rms_norm_mul_f32;
++    vk_pipeline pipeline_rms_norm_f32_small, pipeline_rms_norm_mul_f32_small;
+     vk_pipeline pipeline_rms_norm_mul_add_f32;
+     vk_pipeline pipeline_rms_norm_mul_add_mul_f32;
+     vk_pipeline pipeline_rms_norm_mul_add_partials_f32;
+@@ -869,6 +873,7 @@ struct vk_device_struct {
+     vk_pipeline pipeline_expm1[2];
+     vk_pipeline pipeline_elu[2];
+     vk_pipeline pipeline_gelu[2];
++    vk_pipeline pipeline_gelu_f32_f16;
+     vk_pipeline pipeline_gelu_erf[2];
+     vk_pipeline pipeline_gelu_quick[2];
+     vk_pipeline pipeline_silu[2];
+@@ -924,6 +929,9 @@ struct vk_device_struct {
+     vk_pipeline pipeline_soft_max_large3_f32, pipeline_soft_max_large3_f32_f16;
+ 
+     vk_pipeline pipeline_rope_apply_f32;
++    vk_pipeline pipeline_rms_norm_mul_rope_apply_f32;
++    vk_pipeline pipeline_norm_mul_add_f16;
++    vk_pipeline pipeline_rms_norm_mul_rope_apply_f16;
+     vk_pipeline pipeline_rope_norm_f32, pipeline_rope_norm_f16, pipeline_rope_norm_f32_f16;
+     vk_pipeline pipeline_rope_neox_f32, pipeline_rope_neox_f16, pipeline_rope_neox_f32_f16;
+     vk_pipeline pipeline_rope_multi_f32, pipeline_rope_multi_f16, pipeline_rope_multi_f32_f16;
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index dc6eeb6..00ce0ae 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1247,6 +1247,38 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device,
+ 
+     result.d_split = std::min(std::min(result.subgroup_size, 8u), D_lsb / 4);
+ 
++    if (device->architecture == AMD_GCN && (D & 8) && hsk <= 64 && hsv <= 64 && n_rows >= 64) {
++        // Head sizes like 40 (SD1.x) fall into the reduced 4-row block above; on Vega a 16-row block
++        // split across 4 row groups without a D split is ~30% faster for long sequences.
++        result.block_rows     = 16;
++        result.block_cols     = 64;
++        result.workgroup_size = 128;
++        result.row_split      = 4;
++        result.d_split        = 1;
++    }
++
++    if (device->architecture == AMD_GCN && hsk == 128 && hsv == 128 && n_rows >= 64) {
++        // Head 128 (Anima / Cosmos DiT): one-wave workgroups with small tiles beat the defaults on Vega by
++        // ~11% for 1.5k-token self-attention, ~22% at 5.5k tokens and ~34% for attention to 512 text tokens.
++        result.block_rows     = 16;
++        // KV not divisible by 16 would take the bounds-checked variant, ~25% slower; image token counts
++        // ((W/16)*(H/16) with W, H multiples of 64) are always divisible by 8.
++        result.block_cols     = 16;
++        result.workgroup_size = 64;
++        result.row_split      = 4;
++        result.d_split        = 4;
++    }
++
++    if (device->architecture == AMD_GCN && hsk == 64 && hsv == 64 && n_rows >= 64) {
++        // Head 64 (SDXL UNet): found by a sweep on Vega, -37% for 4k-token self-attention, -26% at 1k tokens and
++        // -44% for attention to 77 text tokens (1.77 -> 1.15 s of attention per step at 832x1216).
++        result.block_rows     = 16;
++        result.block_cols     = 32;
++        result.workgroup_size = 128;
++        result.row_split      = 4;
++        result.d_split        = 4;
++    }
++
+     result.shmem_staging = (device->vendor_id == VK_VENDOR_ID_NVIDIA && hsk < 256 && hsv < 256) ? 1 : 0;
+ 
+     if (!reduce_block_rows && !ggml_vk_flash_attn_scalar_shmem_support(device, result, hsk, hsv, f32acc, k_type, v_type)) {
+@@ -1838,6 +1870,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+         // chip specific tuning
+         if ((device->architecture == AMD_GCN) && (device->driver_id != vk::DriverId::eAmdProprietary)) {
++            // Single-wave tiles keep more accumulators per thread, ~20% faster on Vega for SD UNet shapes
++            m_warptile = { 64, 64, 64, 16, 64, 64, 1, 4, 4, 1, 64 };
++            l_warptile = { 256, 128, 128, 16, 64, 64, 1, 4, 4, 1, 64 };
+             m_warptile_mmq = m_warptile_mmq_int = { 256, 64, 64, 32, 16, 16, 2, 2, 2, 1, 16 };
+             m_warptile_mmqid = m_warptile_mmqid_int = { 256, 64, 64, 32, 16, 16, 2, 2, 2, 1, 16 };
+         } else if (device->vendor_id == VK_VENDOR_ID_AMD && device->coopmat_support && device->driver_id != vk::DriverId::eAmdProprietary) {
+@@ -2207,6 +2242,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ) {
+         auto& vec = device->pipeline_matmul[key];
+         const bool first_call = vec.empty();
++        // non-id matmuls carry optional fused bias/gate and residual bindings
++        const uint32_t mm_param_count = key.mul_mat_id ? param_count : 5;
+         for (size_t i = 0; i < tile_configs.size(); i++) {
+             const auto& tc = tile_configs[i];
+ 
+@@ -2227,14 +2264,14 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+             ggml_vk_create_pipeline(device, vec[i].unaligned,
+                 vec[i].unaligned->name.empty() ? (shader_name + "_" + std::to_string(i)).c_str() : vec[i].unaligned->name.c_str(),
+-                spv_len, spv_data, "main", param_count, push_constant_size,
++                spv_len, spv_data, "main", mm_param_count, push_constant_size,
+                 tc.wg_denoms, spec_fn(tc.warptile, false), 1,
+                 disable_robustness, rfs, rsgs);
+ 
+             if (vec[i].aligned) {
+                 ggml_vk_create_pipeline(device, vec[i].aligned,
+                     vec[i].aligned->name.empty() ? (shader_name + "_aligned_" + std::to_string(i)).c_str() : vec[i].aligned->name.c_str(),
+-                    spv_len, spv_data, "main", param_count, push_constant_size,
++                    spv_len, spv_data, "main", mm_param_count, push_constant_size,
+                     tc.wg_denoms, spec_fn(tc.warptile, true), tc.align,
+                     disable_robustness, rfs, rsgs);
+             }
+@@ -2856,6 +2893,23 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+             return (uint32_t)configs.size() - 1;
+         };
+         device->matmul_id_tile_selector = device->matmul_tile_selector;
++        if (device->architecture == AMD_GCN) {
++            // On GCN the large tile only wins when it covers the matrix exactly and the grid is small;
++            // partial tiles (e.g. n=320) or big grids run faster on the medium tile, unless k is large:
++            // then the medium tile's double memory traffic thrashes the L2 (Anima MLP-down, k=8192: 0.55 -> 0.9 TFLOPS).
++            device->matmul_tile_selector = [](uint32_t m, uint32_t n, uint32_t k, uint32_t shader_core_count,
++                                              const std::vector<vk_matmul_pipeline_pair>& configs) -> uint32_t {
++                if (configs.size() <= 1) return 0;
++                if (m <= 32 || n <= 32) return 0;
++                const uint32_t last = (uint32_t)configs.size() - 1;
++                if (last == 1) return 1;
++                const auto & l = configs[last].unaligned->wg_denoms;
++                const uint32_t tiles_l = CEIL_DIV(m, l[0]) * CEIL_DIV(n, l[1]);
++                if (m % l[0] == 0 && n % l[1] == 0 && tiles_l <= 6 * std::max(shader_core_count, 1u)) return last;
++                if (k >= 4096 && m >= l[0] && n >= l[1]) return last;
++                return 1;
++            };
++        }
+     }
+ 
+     // mul mat vec
+@@ -3265,9 +3319,14 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_norm_f32, "norm_f32", norm_f32_len, norm_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_group_norm_f32, "group_norm_f32", group_norm_f32_len, group_norm_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_norm_mul_add_f32, "norm_mul_add_f32", norm_mul_add_f32_len, norm_mul_add_f32_data, "main", 4, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_norm_mul_add_f16, "norm_mul_add_f16", norm_mul_add_f16_len, norm_mul_add_f16_data, "main", 4, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_group_norm_mul_add_f32, "group_norm_mul_add_f32", group_norm_mul_add_f32_len, group_norm_mul_add_f32_data, "main", 4, sizeof(vk_op_push_constants), {1, 1, 1}, {}, 1);
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_f32, "rms_norm_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 0}, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_f32, "rms_norm_mul_f32", rms_norm_f32_len, rms_norm_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1}, 1, true);
++    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_f32_small, "rms_norm_f32_small", rms_norm_small_f32_len, rms_norm_small_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 0}, 1, true);
++    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_f32_small, "rms_norm_mul_f32_small", rms_norm_small_f32_len, rms_norm_small_f32_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1}, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_add_f32, "rms_norm_mul_add_f32", rms_norm_mul_add_f32_len, rms_norm_mul_add_f32_data, "main", 5, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1, 0}, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_add_mul_f32, "rms_norm_mul_add_mul_f32", rms_norm_mul_add_f32_len, rms_norm_mul_add_f32_data, "main", 5, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1, 1}, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_add_partials_f32, "rms_norm_mul_add_partials_f32", rms_norm_mul_add_partials_f32_len, rms_norm_mul_add_partials_f32_data, "main", 6, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1, 0}, 1, true);
+@@ -3431,6 +3490,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+     CREATE_UNARY(elu)
+     CREATE_UNARY(gelu)
++    ggml_vk_create_pipeline(device, device->pipeline_gelu_f32_f16, "gelu_f32_f16", gelu_f32_f16_len, gelu_f32_f16_data, "main", 2, sizeof(vk_op_push_constants), {256, 1, 1}, {}, 1);
+     CREATE_UNARY(gelu_erf)
+     CREATE_UNARY(gelu_quick)
+     CREATE_UNARY(silu)
+@@ -3519,6 +3579,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ggml_vk_create_pipeline(device, device->pipeline_soft_max_large3_f32_f16, "soft_max_large3_f32_f16", soft_max_large3_f32_f16_len, soft_max_large3_f32_f16_data, "main", 6, sizeof(vk_op_soft_max_push_constants), {1, 1, 1}, { 128, 4 }, 1, true);
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_rope_apply_f32, "rope_apply_f32", rope_apply_f32_len, rope_apply_f32_data, "main", 3, sizeof(vk_op_rope_apply_push_constants), {256, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_rope_apply_f32, "rms_norm_mul_rope_apply_f32", rms_norm_mul_rope_apply_f32_len, rms_norm_mul_rope_apply_f32_data, "main", 4, sizeof(vk_op_rms_norm_rope_apply_push_constants), {1, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_rms_norm_mul_rope_apply_f16, "rms_norm_mul_rope_apply_f16", rms_norm_mul_rope_apply_f16_len, rms_norm_mul_rope_apply_f16_data, "main", 4, sizeof(vk_op_rms_norm_rope_apply_push_constants), {1, 1, 1}, {}, 1);
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_rope_norm_f32, "rope_norm_f32", rope_norm_f32_len, rope_norm_f32_data, "main", 5, sizeof(vk_op_rope_push_constants), {1, 512, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_rope_neox_f32, "rope_neox_f32", rope_neox_f32_len, rope_neox_f32_data, "main", 5, sizeof(vk_op_rope_push_constants), {1, 512, 1}, {}, 1);
+@@ -3639,9 +3701,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     }
+ 
+ #define IM2COL(bda) \
+-    ggml_vk_create_pipeline(device, device->pipeline_im2col_f32, "im2col_f32", im2col_f32 ## bda ## _len, im2col_f32 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);   \
++    ggml_vk_create_pipeline(device, device->pipeline_im2col_f32, "im2col_f32", im2col_f32 ## bda ## _len, im2col_f32 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_push_constants), {64, 64, 1}, { device->subgroup_size }, 1, true);   \
+     ggml_vk_create_pipeline(device, device->pipeline_im2col_3d_f32, "im2col_3d_f32", im2col_3d_f32 ## bda ## _len, im2col_3d_f32 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_3d_push_constants), {512, 1, 1}, { 512 }, 1, true);      \
+-    ggml_vk_create_pipeline(device, device->pipeline_im2col_f32_f16, "im2col_f32_f16", im2col_f32_f16 ## bda ## _len, im2col_f32_f16 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);   \
++    ggml_vk_create_pipeline(device, device->pipeline_im2col_f32_f16, "im2col_f32_f16", im2col_f32_f16 ## bda ## _len, im2col_f32_f16 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_push_constants), {64, 64, 1}, { device->subgroup_size }, 1, true);   \
+     ggml_vk_create_pipeline(device, device->pipeline_im2col_3d_f32_f16, "im2col_3d_f32_f16", im2col_3d_f32_f16 ## bda ## _len, im2col_3d_f32_f16 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_3d_push_constants), {512, 1, 1}, { 512 }, 1, true);
+     if (device->shader_int64 && device->buffer_device_address) {
+         IM2COL(_bda)
+@@ -4804,7 +4866,9 @@ vk_device ggml_vk_get_device(size_t idx) {
+             switch (device->vendor_id) {
+ #ifndef GGML_VULKAN_RUN_TESTS
+             case VK_VENDOR_ID_AMD:
+-                device->mul_mat_l[i]    = device->coopmat_support && device->driver_id != vk::DriverId::eAmdProprietary;
++                device->mul_mat_l[i]    = (device->coopmat_support && device->driver_id != vk::DriverId::eAmdProprietary) ||
++                                          (device->architecture == AMD_GCN && device->driver_id != vk::DriverId::eAmdProprietary &&
++                                           (i == GGML_TYPE_F16 || i == GGML_TYPE_F32));
+                 device->mul_mat_m[i]    = true;
+                 device->mul_mat_s[i]    = true;
+                 device->mul_mat_id_l[i] = false;
+@@ -5954,7 +6018,8 @@ void ggml_vk_matmul(
+         uint32_t m, uint32_t n, uint32_t k, uint32_t stride_a, uint32_t stride_b, uint32_t stride_d,
+         uint32_t batch_stride_a, uint32_t batch_stride_b, uint32_t batch_stride_d,
+         uint32_t split_k, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3,
+-        uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes) {
++        uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes, const vk_subbuffer * bias, uint32_t bias_div, uint32_t bias_len,
++        const vk_subbuffer * resid, uint32_t epi) {
+         VK_LOG_DEBUG("ggml_vk_matmul(a: (" << a.buffer->buffer << ", " << a.offset << ", " << a.size << "), b: (" << b.buffer->buffer << ", " << b.offset << ", " << b.size << "), d: (" << d.buffer->buffer << ", " << d.offset << ", " << d.size << "), split_k: (" << (split_k_buffer.buffer != nullptr ? split_k_buffer.buffer->buffer : VK_NULL_HANDLE) << ", " << split_k_buffer.offset << ", " << split_k_buffer.size << "), m: " << m << ", n: " << n << ", k: " << k << ", stride_a: " << stride_a << ", stride_b: " << stride_b << ", stride_d: " << stride_d << ", batch_stride_a: " << batch_stride_a << ", batch_stride_b: " << batch_stride_b << ", batch_stride_d: " << batch_stride_d << ", split_k: " << split_k << ", batch: " << batch << ", ne02: " << ne02 << ", ne12: " << ne12 << ", broadcast2: " << broadcast2 << ", broadcast3: " << broadcast3 << ", padded_n: " << padded_n << ")");
+     if (split_k == 1) {
+         // a small tile can still produce more workgroups than the device allows on the n axis:
+@@ -5978,8 +6043,14 @@ void ggml_vk_matmul(
+             while (base_work_group_z < batch) {
+                 uint32_t groups_z = std::min(batch - base_work_group_z, ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
+ 
+-                const vk_mat_mat_push_constants pc = { m, n_chunk, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k, ne02, ne12, broadcast2, broadcast3, uint32_t(padded_n - n_base) };
+-                ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk }, pc, { m, n_chunk, groups_z });
++                const vk_mat_mat_push_constants pc = { m, n_chunk, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k, ne02, ne12, broadcast2, broadcast3, uint32_t(padded_n - n_base),
++                                                       uint32_t(n_base * stride_d), bias_div, bias_len, epi };
++                vk_subbuffer resid_chunk = resid ? *resid : d_chunk;
++                if (resid) {
++                    resid_chunk.offset += n_base * d_col_bytes;
++                    resid_chunk.size   -= n_base * d_col_bytes;
++                }
++                ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk, bias ? *bias : d, resid_chunk }, pc, { m, n_chunk, groups_z });
+                 base_work_group_z += groups_z;
+             }
+         }
+@@ -6002,9 +6073,9 @@ void ggml_vk_matmul(
+     while (base_work_group_z < batch) {
+         uint32_t groups_z = std::min(batch - base_work_group_z, ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
+ 
+-        const vk_mat_mat_push_constants pc1 = { m, n, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k_split, ne02, ne12, broadcast2, broadcast3, padded_n };
++        const vk_mat_mat_push_constants pc1 = { m, n, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k_split, ne02, ne12, broadcast2, broadcast3, padded_n, 0, bias_div, bias_len, epi };
+         // Make sure enough workgroups get assigned for split k to work
+-        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
++        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer, bias ? *bias : d, resid ? *resid : d }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
+         base_work_group_z += groups_z;
+     }
+     ggml_vk_sync_buffers(ctx, subctx);
+@@ -6048,18 +6119,18 @@ static const std::vector<vk_matmul_pipeline_pair>* ggml_vk_get_mul_mat_mat_pipel
+ 
+ static vk_pipeline ggml_vk_guess_matmul_pipeline_map(ggml_backend_vk_context * ctx,
+         const std::vector<vk_matmul_pipeline_pair>& configs,
+-        uint32_t m, uint32_t n, bool aligned, bool mul_mat_id) {
++        uint32_t m, uint32_t n, uint32_t k, bool aligned, bool mul_mat_id) {
+     auto& selector = mul_mat_id ? ctx->device->matmul_id_tile_selector : ctx->device->matmul_tile_selector;
+-    uint32_t idx = selector(m, n, 0, ctx->device->shader_core_count, configs);
++    uint32_t idx = selector(m, n, k, ctx->device->shader_core_count, configs);
+     if (idx >= configs.size()) idx = (uint32_t)configs.size() - 1;
+     return (aligned && configs[idx].aligned) ? configs[idx].aligned : configs[idx].unaligned;
+ }
+ 
+ static uint32_t ggml_vk_guess_matmul_pipeline_align_map(ggml_backend_vk_context * ctx,
+         const std::vector<vk_matmul_pipeline_pair>& configs,
+-        uint32_t m, uint32_t n, bool mul_mat_id) {
++        uint32_t m, uint32_t n, uint32_t k, bool mul_mat_id) {
+     auto& selector = mul_mat_id ? ctx->device->matmul_id_tile_selector : ctx->device->matmul_tile_selector;
+-    uint32_t idx = selector(m, n, 0, ctx->device->shader_core_count, configs);
++    uint32_t idx = selector(m, n, k, ctx->device->shader_core_count, configs);
+     if (idx >= configs.size()) idx = (uint32_t)configs.size() - 1;
+     return configs[idx].align;
+ }
+@@ -6371,7 +6442,12 @@ static ggml_type ggml_vk_mul_mat_b_type(
+     return f16_type;
+ }
+ 
+-static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, bool disable_split_k) {
++// fused mul_mm epilogue (mul_mm.comp): out = (acc + bias) or (acc * gate), plus resid
++#define MM_EPI_GATE  1u
++#define MM_EPI_RESID 2u
++
++static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, bool disable_split_k, const ggml_tensor * bias = nullptr, uint32_t bias_div = 1,
++                                  uint32_t epi = 0, const ggml_tensor * resid = nullptr) {
+     VK_LOG_DEBUG("ggml_vk_mul_mat_q_f16((" << src0 << ", name=" << src0->name << ", type=" << ggml_type_name(src0->type) << ", ne0=" << src0->ne[0] << ", ne1=" << src0->ne[1] << ", ne2=" << src0->ne[2] << ", ne3=" << src0->ne[3] << ", nb0=" << src0->nb[0] << ", nb1=" << src0->nb[1] << ", nb2=" << src0->nb[2] << ", nb3=" << src0->nb[3];
+     std::cerr << "), (" << src1 << ", name=" << src1->name << ", type=" << ggml_type_name(src1->type) << ", ne0=" << src1->ne[0] << ", ne1=" << src1->ne[1] << ", ne2=" << src1->ne[2] << ", ne3=" << src1->ne[3] << ", nb0=" << src1->nb[0] << ", nb1=" << src1->nb[1] << ", nb2=" << src1->nb[2] << ", nb3=" << src1->nb[3];
+     std::cerr << "), (" << dst << ", name=" << dst->name << ", type=" << ggml_type_name(dst->type) << ", ne0=" << dst->ne[0] << ", ne1=" << dst->ne[1] << ", ne2=" << dst->ne[2] << ", ne3=" << dst->ne[3] << ", nb0=" << dst->nb[0] << ", nb1=" << dst->nb[1] << ", nb2=" << dst->nb[2] << ", nb3=" << dst->nb[3];
+@@ -6446,10 +6522,10 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+ 
+     GGML_ASSERT(mmp_map != nullptr);
+ 
+-    const uint32_t kpad = quantize_y ? 0 : ggml_vk_align_size(ne10, ggml_vk_guess_matmul_pipeline_align_map(ctx, *mmp_map, ne01, ne11, false));
++    const uint32_t kpad = quantize_y ? 0 : ggml_vk_align_size(ne10, ggml_vk_guess_matmul_pipeline_align_map(ctx, *mmp_map, ne01, ne11, ne10, false));
+     const bool aligned = !quantize_y && ne10 == kpad && ne01 > 8 && ne11 > 8;
+ 
+-    vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, ne11, aligned, false);
++    vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, ne11, ne10, aligned, false);
+ 
+     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
+         pipeline = ggml_vk_get_64b_indexing_pipeline(ctx, pipeline);
+@@ -6626,6 +6702,17 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+         ? (quantize_y ? (uint64_t)(ne10 / ggml_blck_size(GGML_TYPE_Q8_1)) * ggml_type_size(GGML_TYPE_Q8_1) : (uint64_t)ne10 * sizeof(ggml_fp16_t))
+         : (uint64_t)src1->nb[1];
+ 
++    vk_subbuffer bias_buf{};
++    if (bias) {
++        GGML_ASSERT(!quantize_y && stride_d == ne01 && stride_batch_d == ne01*ne11);
++        bias_buf = ggml_vk_tensor_subbuffer(ctx, bias);
++    }
++    vk_subbuffer resid_buf{};
++    if (resid) {
++        GGML_ASSERT(!quantize_y && stride_d == ne01 && stride_batch_d == ne01*ne11);
++        resid_buf = ggml_vk_tensor_subbuffer(ctx, resid);
++    }
++
+     // compute
+     ggml_vk_matmul(
+         ctx, subctx, pipeline,
+@@ -6634,7 +6721,9 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+         ne01, ne11, ne10,
+         ne10, ne10, stride_d, stride_batch_x, stride_batch_y, stride_batch_d,
+         split_k, ne12*ne13, ne02, ne12, r2, r3, padded_n,
+-        b_col_bytes, (uint64_t)dst->nb[1]
++        b_col_bytes, (uint64_t)dst->nb[1],
++        bias ? &bias_buf : nullptr, bias_div, bias ? (uint32_t)ggml_nelements(bias) : 0,
++        resid ? &resid_buf : nullptr, epi
+     );  // NOLINT
+ 
+     if (x_non_contig || qx_needs_dequant) {
+@@ -7467,6 +7556,11 @@ static void ggml_vk_mul_mat_i8_tensorwise(
+     dispatch(ctx->device->pipeline_mul_mat_i8_tensorwise, coop_rows, rows - coop_rows);
+ }
+ 
++static int ggml_vk_can_fuse_mul_mat_bias(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx,
++                                         const ggml_tensor ** bias_out, uint32_t * bias_div_out);
++static int ggml_vk_can_fuse_mul_mat_epi(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx,
++                                        const ggml_tensor ** gate_out, const ggml_tensor ** resid_out, uint32_t * epi_out);
++
+ void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
+     ggml_tensor * dst = cgraph->nodes[node_idx];
+     ggml_tensor * src0 = dst->src[0];
+@@ -7536,6 +7630,18 @@ void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const st
+     } else if ((dst->ne[1] == 1 || (dst->ne[1] <= mul_mat_vec_max_cols && src1->ne[2] * src1->ne[3] == 1)) &&
+                (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16 || ggml_is_quantized(src0->type))) {
+         ggml_vk_mul_mat_vec_q_f16(ctx, subctx, cgraph, node_idx);
++    } else if (ctx->num_additional_fused_ops > 0) {
++        const ggml_tensor * bias = nullptr;
++        uint32_t bias_div = 1;
++        const ggml_tensor * resid = nullptr;
++        uint32_t epi = 0;
++        if (ggml_vk_can_fuse_mul_mat_bias(ctx, cgraph, node_idx, &bias, &bias_div) == node_idx + ctx->num_additional_fused_ops) {
++            ggml_vk_mul_mat_q_f16(ctx, subctx, src0, src1, dst, false, bias, bias_div);
++        } else {
++            GGML_ASSERT(ggml_vk_can_fuse_mul_mat_epi(ctx, cgraph, node_idx, &bias, &resid, &epi) == node_idx + ctx->num_additional_fused_ops);
++            // the epilogue writes the last fused node, which has the layout of the mul_mat result
++            ggml_vk_mul_mat_q_f16(ctx, subctx, src0, src1, cgraph->nodes[node_idx + ctx->num_additional_fused_ops], false, bias, 1, epi, resid);
++        }
+     } else {
+         ggml_vk_mul_mat_q_f16(ctx, subctx, src0, src1, dst, false);
+     }
+@@ -7645,10 +7751,10 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+                                                   y_decode_vector_staging || y_needs_k_padding);
+     const bool qy_needs_dequant = y_needs_reformat;
+ 
+-    const uint32_t kpad = quantize_y ? 0 : ggml_vk_align_size(ne10, ggml_vk_guess_matmul_pipeline_align_map(ctx, *mmp_map, ne01, nei1, true));
++    const uint32_t kpad = quantize_y ? 0 : ggml_vk_align_size(ne10, ggml_vk_guess_matmul_pipeline_align_map(ctx, *mmp_map, ne01, nei1, ne10, true));
+     const bool aligned = !quantize_y && ne10 == kpad && ne01 > 8 && nei1 > 8;
+ 
+-    vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, nei1, aligned, true);
++    vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, nei1, ne10, aligned, true);
+ 
+     const uint32_t bn = pipeline->wg_denoms[1];
+     const uint64_t max_tiles = ggml_vk_mul_mat_id_max_tiles(n_as, nei0 * nei1, bn);
+@@ -8347,8 +8453,11 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
+     vk_fa_tuning_params tuning_params = get_fa_tuning_params(ctx->device, HSK, HSV, 512, KV, k_type_eff, v_type_eff, f32acc);
+     const uint32_t max_gqa = std::min(tuning_params.block_rows, 32u);
+ 
++    // max_gqa comes from the 512-row parameters, but the kernel runs with the parameters for gqa_ratio rows,
++    // whose block can be smaller; packing more rows than that block holds gives wrong results.
+     if (N <= 8 && qk_ratio > 1 && qk_ratio <= max_gqa &&
+-        qk_ratio * nek2 == neq2 && nek2 == nev2 && nem2 <= 1) {
++        qk_ratio * nek2 == neq2 && nek2 == nev2 && nem2 <= 1 &&
++        get_fa_tuning_params(ctx->device, HSK, HSV, qk_ratio, KV, k_type_eff, v_type_eff, f32acc).block_rows >= qk_ratio) {
+         // grouped query attention - make the N dimension equal to gqa_ratio, reduce
+         // workgroups proportionally in y dimension. The shader will detect gqa_ratio > 1
+         // and change addressing calculations to index Q's dimension 2.
+@@ -9103,6 +9212,10 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+             if (ctx->do_add_rms_partials) {
+                 return ctx->fused_rms_norm_mode == RMS_NORM_MUL ? ctx->device->pipeline_rms_norm_mul_partials_f32 : ctx->device->pipeline_rms_norm_partials_f32;
+             }
++            if (src0->ne[0] <= 256) {
++                // a 512-thread workgroup per short row leaves most threads idle and spends 9 barriers on the reduction
++                return ctx->fused_rms_norm_mode == RMS_NORM_MUL ? ctx->device->pipeline_rms_norm_mul_f32_small : ctx->device->pipeline_rms_norm_f32_small;
++            }
+             return ctx->fused_rms_norm_mode == RMS_NORM_MUL ? ctx->device->pipeline_rms_norm_mul_f32 : ctx->device->pipeline_rms_norm_f32;
+         }
+         return nullptr;
+@@ -9767,14 +9880,10 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+             const uint32_t batch = src1->ne[is_2D ? 3 : 2];
+ 
+             const uint32_t CHW = IC * KH * KW;
+-            // Cap X workgroups to limit concurrent IC channel reads.
+-            // The shader loops over X to cover the full CHW dimension.
+-            // AMD prefers a lower limit
+-            const uint32_t min_cap = ctx->device->vendor_id == VK_VENDOR_ID_AMD ? 512u : 4096u;
+-            const uint32_t x_elements = std::min(CHW, std::max(min_cap, OW * KH * KW));
+-            elements = { x_elements, OW, OH * batch };
+-            elements[1] = std::min(elements[1], ctx->device->properties.limits.maxComputeWorkGroupCount[1]);
+-            elements[2] = std::min(elements[2], ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
++            // 64x64 tiles of (CHW, output row); the shader loops over both axes past the dispatch limits
++            const uint64_t max_x = (uint64_t)ctx->device->properties.limits.maxComputeWorkGroupCount[0] * 64;
++            const uint64_t max_y = (uint64_t)ctx->device->properties.limits.maxComputeWorkGroupCount[1] * 64;
++            elements = { (uint32_t)std::min<uint64_t>(CHW, max_x), (uint32_t)std::min<uint64_t>((uint64_t)OW * OH * batch, max_y), 1 };
+         } break;
+     case GGML_OP_IM2COL_3D:
+         {
+@@ -10947,6 +11056,65 @@ void ggml_vk_group_norm(ggml_backend_vk_context * ctx, vk_context& subctx, const
+     ggml_vk_op_f32<vk_op_push_constants>(ctx, subctx, src0, nullptr, nullptr, nullptr, dst, GGML_OP_GROUP_NORM, { group_size, 0, eps, 0.0f, 0.0f, 0.0f });
+ }
+ 
++static int ggml_vk_match_norm_affine(const struct ggml_cgraph * cgraph, int node_idx, ggml_op norm_op, bool silu, int idxs[4]);
++
++static void ggml_vk_norm_mul_add(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    int idxs[4];
++    const int last_add = ggml_vk_match_norm_affine(cgraph, node_idx, GGML_OP_NORM, false, idxs);
++    // the last fused node is the add, or a cast of it to f16 (input of f16 matmuls)
++    const ggml_tensor * dst = cgraph->nodes[node_idx + ctx->num_additional_fused_ops];
++    GGML_ASSERT(last_add == node_idx + ctx->num_additional_fused_ops || (last_add + 1 == node_idx + ctx->num_additional_fused_ops && dst->op == GGML_OP_CPY));
++    const ggml_tensor * norm = cgraph->nodes[idxs[0]];
++    const ggml_tensor * mul  = cgraph->nodes[idxs[1]];
++    const ggml_tensor * add  = cgraph->nodes[idxs[2]];
++    const ggml_tensor * src0 = norm->src[0];
++    const ggml_tensor * w = mul->src[0] == norm ? mul->src[1] : mul->src[0];
++    const ggml_tensor * b = add->src[0] == mul ? add->src[1] : add->src[0];
++
++    const uint32_t nrows = (uint32_t)ggml_nrows(src0);
++    const vk_op_push_constants pc = { (uint32_t)src0->ne[0], nrows, ggml_get_op_params_f32(norm, 0), 0.0f, 0.0f, 0.0f };
++
++    vk_pipeline pipeline = dst->type == GGML_TYPE_F16 ? ctx->device->pipeline_norm_mul_add_f16 : ctx->device->pipeline_norm_mul_add_f32;
++    GGML_UNUSED(add);
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
++        {
++            ggml_vk_tensor_subbuffer(ctx, src0),
++            ggml_vk_tensor_subbuffer(ctx, w),
++            ggml_vk_tensor_subbuffer(ctx, b),
++            ggml_vk_tensor_subbuffer(ctx, dst),
++        }, pc, { std::min(nrows, 512u), std::min(CEIL_DIV(nrows, 512u), 512u), CEIL_DIV(nrows, 262144u) });
++}
++
++static void ggml_vk_group_norm_mul_add(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    int idxs[4];
++    const int last = node_idx + ctx->num_additional_fused_ops;
++    const bool do_silu = cgraph->nodes[last]->op == GGML_OP_UNARY;
++    GGML_ASSERT(ggml_vk_match_norm_affine(cgraph, node_idx, GGML_OP_GROUP_NORM, do_silu, idxs) == last);
++    const ggml_tensor * gn  = cgraph->nodes[idxs[0]];
++    const ggml_tensor * mul = cgraph->nodes[idxs[1]];
++    const ggml_tensor * add = cgraph->nodes[idxs[2]];
++    const ggml_tensor * src0 = gn->src[0];
++    const ggml_tensor * w = mul->src[0] == gn ? mul->src[1] : mul->src[0];
++    const ggml_tensor * b = add->src[0] == mul ? add->src[1] : add->src[0];
++    const ggml_tensor * dst = cgraph->nodes[last];
++
++    const uint32_t num_groups = ggml_get_op_params_i32(gn, 0);
++    const float eps = ggml_get_op_params_f32(gn, 1);
++    const uint32_t group_size = src0->ne[0] * src0->ne[1] * (src0->ne[2] / num_groups);
++    const vk_op_push_constants pc = { group_size, (uint32_t)(src0->ne[0] * src0->ne[1]), eps, (float)src0->ne[2], do_silu ? 1.0f : 0.0f, 0.0f };
++
++    vk_pipeline pipeline = ctx->device->pipeline_group_norm_mul_add_f32;
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
++        {
++            ggml_vk_tensor_subbuffer(ctx, src0),
++            ggml_vk_tensor_subbuffer(ctx, w),
++            ggml_vk_tensor_subbuffer(ctx, b),
++            ggml_vk_tensor_subbuffer(ctx, dst),
++        }, pc, { num_groups * (uint32_t)src0->ne[3], 1, 1 });
++}
++
+ static uint32_t ggml_vk_rms_num_partials(ggml_backend_vk_context * ctx, const ggml_tensor *node) {
+     const uint32_t ne = (uint32_t)node->ne[0];
+     const uint32_t denom = ctx->device->pipeline_add_rms[0][0][0]->wg_denoms[0];
+@@ -11016,10 +11184,49 @@ static void ggml_vk_rms_norm_finish(ggml_backend_vk_context * ctx, const ggml_te
+     }
+ }
+ 
++// rms_norm -> mul -> rope_apply (q/k norms of DiT attention), see ggml_vk_can_fuse_rms_norm_mul_rope_apply
++static void ggml_vk_rms_norm_mul_rope_apply(ggml_backend_vk_context * ctx, vk_context & subctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    const ggml_tensor * rms  = cgraph->nodes[node_idx];
++    const ggml_tensor * mul  = cgraph->nodes[node_idx + 1];
++    const ggml_tensor * rope = cgraph->nodes[node_idx + 2];
++    const ggml_tensor * dst  = cgraph->nodes[node_idx + ctx->num_additional_fused_ops];  // rope, or the cast after it
++    const ggml_tensor * x    = rms->src[0];
++    const ggml_tensor * w    = mul->src[0] == rms ? mul->src[1] : mul->src[0];
++    const ggml_tensor * pe   = rope->src[1];
++    vk_pipeline pipeline = dst->type == GGML_TYPE_F16 ? ctx->device->pipeline_rms_norm_mul_rope_apply_f16 : ctx->device->pipeline_rms_norm_mul_rope_apply_f32;
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++
++    vk_op_rms_norm_rope_apply_push_constants pc {};
++    pc.rope.half_dim = x->ne[0]/2;
++    pc.rope.heads    = x->ne[1];
++    pc.rope.tokens   = x->ne[2];
++    pc.rope.pairs    = ggml_nelements(x)/2;
++    for (int i = 0; i < 4; ++i) {
++        pc.rope.x_stride[i]  = x->nb[i]/sizeof(float);
++        pc.rope.pe_stride[i] = pe->nb[i]/sizeof(float);
++    }
++    pc.rope.x_offset    = get_misalign_bytes(ctx, x)/sizeof(float);
++    pc.rope.pe_offset   = get_misalign_bytes(ctx, pe)/sizeof(float);
++    pc.rope.dst_offset  = get_misalign_bytes(ctx, dst)/ggml_type_size(dst->type);
++    pc.rope.interleaved = ggml_get_op_params_i32(rope, 0);
++    pc.w_offset         = get_misalign_bytes(ctx, w)/sizeof(float);
++    pc.eps              = ggml_get_op_params_f32(rms, 0);
++
++    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
++        { ggml_vk_tensor_subbuffer(ctx, x, true), ggml_vk_tensor_subbuffer(ctx, w, true),
++          ggml_vk_tensor_subbuffer(ctx, pe, true), ggml_vk_tensor_subbuffer(ctx, dst, true) },
++        pc, { (uint32_t)x->ne[1], (uint32_t)x->ne[2], (uint32_t)x->ne[3] });
++}
++
+ void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx, float * op_params) {
+     ggml_tensor * rms = cgraph->nodes[node_idx];
+     const ggml_tensor * src0 = rms->src[0];
+ 
++    if (ctx->fused_rms_norm_mode == RMS_NORM_MUL_ROPE_APPLY) {
++        ggml_vk_rms_norm_mul_rope_apply(ctx, subctx, cgraph, node_idx);
++        return;
++    }
++
+     if (ctx->fused_rms_norm_mode == RMS_NORM_VIEW_SET_ROWS) {
+         GGML_ASSERT(ctx->num_additional_fused_ops == 2);
+         ggml_tensor * set_rows = cgraph->nodes[node_idx + 2];
+@@ -12771,11 +12978,19 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
+ 
+         break;
+     case GGML_OP_NORM:
+-        ggml_vk_norm(ctx, compute_ctx, src0, node);
++        if (ctx->num_additional_fused_ops > 0) {
++            ggml_vk_norm_mul_add(ctx, compute_ctx, cgraph, node_idx);
++        } else {
++            ggml_vk_norm(ctx, compute_ctx, src0, node);
++        }
+ 
+         break;
+     case GGML_OP_GROUP_NORM:
+-        ggml_vk_group_norm(ctx, compute_ctx, src0, node);
++        if (ctx->num_additional_fused_ops > 0) {
++            ggml_vk_group_norm_mul_add(ctx, compute_ctx, cgraph, node_idx);
++        } else {
++            ggml_vk_group_norm(ctx, compute_ctx, src0, node);
++        }
+ 
+         break;
+     case GGML_OP_RMS_NORM:
+@@ -12794,6 +13009,20 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
+             ggml_vk_topk_moe(ctx, compute_ctx, cgraph, node_idx);
+             break;
+         }
++        if (ctx->num_additional_fused_ops && cgraph->nodes[node_idx + 1]->op == GGML_OP_CPY) {
++            // gelu with the following cast to f16 (input of an f16 matmul)
++            ggml_tensor * cpy = cgraph->nodes[node_idx + 1];
++            vk_pipeline pipeline = ctx->device->pipeline_gelu_f32_f16;
++            ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++            const uint32_t n4 = (uint32_t)(ggml_nelements(src0) / 4);
++            const vk_op_push_constants pc = { n4, 0, 0.0f, 0.0f, 0.0f, 0.0f };
++            const uint32_t groups = CEIL_DIV(n4, 256u);
++            const uint32_t groups_x = std::min(groups, ctx->device->properties.limits.maxComputeWorkGroupCount[0]);
++            ggml_vk_dispatch_pipeline(ctx, compute_ctx, pipeline,
++                { ggml_vk_tensor_subbuffer(ctx, src0), ggml_vk_tensor_subbuffer(ctx, cpy) },
++                pc, { groups_x * 256, CEIL_DIV(groups, groups_x), 1 });
++            break;
++        }
+         if (ctx->num_additional_fused_ops) {
+             ggml_vk_unary_mul(ctx, compute_ctx, cgraph, node_idx);
+             break;
+@@ -13760,6 +13989,220 @@ bool ggml_vk_is_empty(ggml_tensor * node) {
+     return ggml_is_empty(node) || node->op == GGML_OP_NONE || node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE;
+ }
+ 
++// Matches norm -> mul -> add [-> silu] as built by sd.cpp: the mul/add/silu are in-place views of the norm
++// output (which ggml_can_fuse rejects), and no-op reshapes of the per-channel weights may sit between them.
++// Returns the index of the last matched node, or -1.
++static int ggml_vk_match_norm_affine(const struct ggml_cgraph * cgraph, int node_idx, ggml_op norm_op, bool silu, int idxs[4]) {
++    const ggml_op ops[4] = { norm_op, GGML_OP_MUL, GGML_OP_ADD, GGML_OP_UNARY };
++    const int n_ops = silu ? 4 : 3;
++    const ggml_tensor * root = cgraph->nodes[node_idx];
++    int j = node_idx;
++    for (int k = 0; k < n_ops; ++k, ++j) {
++        while (k > 0 && j < cgraph->n_nodes && ggml_op_is_empty(cgraph->nodes[j]->op)) {
++            ++j;
++        }
++        if (j >= cgraph->n_nodes) {
++            return -1;
++        }
++        const ggml_tensor * node = cgraph->nodes[j];
++        if (node->op != ops[k] || (node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
++            return -1;
++        }
++        if (k > 0) {
++            const ggml_tensor * prev = cgraph->nodes[idxs[k - 1]];
++            if ((node->src[0] != prev && node->src[1] != prev) || !ggml_are_same_shape(node, prev)) {
++                return -1;
++            }
++        }
++        if (k < n_ops - 1 && (ggml_node_get_use_count(cgraph, j) != 1 || (node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++                              (node->view_src != nullptr && node->view_src != root))) {
++            return -1;
++        }
++        idxs[k] = j;
++    }
++    if ((silu && ggml_get_unary_op(cgraph->nodes[idxs[3]]) != GGML_UNARY_OP_SILU) || idxs[n_ops - 1] - node_idx > 12) {
++        return -1;
++    }
++    return idxs[n_ops - 1];
++}
++
++static int ggml_vk_can_fuse_norm_mul_add(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx, int idxs[4]) {
++    if (ggml_vk_match_norm_affine(cgraph, node_idx, GGML_OP_NORM, false, idxs) < 0) {
++        return -1;
++    }
++    const ggml_tensor * norm = cgraph->nodes[idxs[0]];
++    const ggml_tensor * mul  = cgraph->nodes[idxs[1]];
++    const ggml_tensor * add  = cgraph->nodes[idxs[2]];
++    const ggml_tensor * w = mul->src[0] == norm ? mul->src[1] : mul->src[0];
++    const ggml_tensor * b = add->src[0] == mul ? add->src[1] : add->src[0];
++    for (const ggml_tensor * t : { w, b }) {
++        if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t) || get_misalign_bytes(ctx, t) != 0 ||
++            t->ne[0] != norm->ne[0] || ggml_nelements(t) != t->ne[0]) {
++            return -1;
++        }
++    }
++    for (const ggml_tensor * t : std::initializer_list<const ggml_tensor *>{ norm->src[0], norm, mul, add }) {
++        if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t) || !ggml_are_same_shape(t, norm) || get_misalign_bytes(ctx, t) != 0) {
++            return -1;
++        }
++    }
++    return idxs[2];
++}
++
++static int ggml_vk_can_fuse_group_norm_mul_add(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx, bool silu, int idxs[4]) {
++    const int last = ggml_vk_match_norm_affine(cgraph, node_idx, GGML_OP_GROUP_NORM, silu, idxs);
++    if (last < 0) {
++        return -1;
++    }
++    const ggml_tensor * gn  = cgraph->nodes[idxs[0]];
++    const ggml_tensor * mul = cgraph->nodes[idxs[1]];
++    const ggml_tensor * add = cgraph->nodes[idxs[2]];
++    const ggml_tensor * dst = cgraph->nodes[last];
++    const ggml_tensor * w = mul->src[0] == gn ? mul->src[1] : mul->src[0];
++    const ggml_tensor * b = add->src[0] == mul ? add->src[1] : add->src[0];
++    auto per_channel = [&](const ggml_tensor * t) {
++        return t->type == GGML_TYPE_F32 && ggml_is_contiguous(t) && get_misalign_bytes(ctx, t) == 0 &&
++               t->ne[0] == 1 && t->ne[1] == 1 && t->ne[2] == gn->ne[2] && t->ne[3] == 1;
++    };
++    if (!per_channel(w) || !per_channel(b)) {
++        return -1;
++    }
++    for (const ggml_tensor * t : std::initializer_list<const ggml_tensor *>{ gn->src[0], gn, mul, add, dst }) {
++        if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t) || !ggml_are_same_shape(t, gn) || get_misalign_bytes(ctx, t) != 0) {
++            return -1;
++        }
++    }
++    return gn->ne[2] % ggml_get_op_params_i32(gn, 0) == 0 ? last : -1;
++}
++
++// Matches mul_mat -> [no-op views] -> in-place add of a broadcast bias vector (linear and im2col conv bias in sd.cpp).
++// The bias is applied in the mul_mm store, so only the plain mul_mm path qualifies.
++// Returns the index of the add, or -1.
++static int ggml_vk_can_fuse_mul_mat_bias(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx,
++                                         const ggml_tensor ** bias_out, uint32_t * bias_div_out) {
++    const ggml_tensor * mm = cgraph->nodes[node_idx];
++    if (mm->op != GGML_OP_MUL_MAT || ctx->device->coopmat_support || ctx->device->coopmat2 ||
++        mm->type != GGML_TYPE_F32 || !ggml_is_contiguous(mm) || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++        ggml_node_get_use_count(cgraph, node_idx) != 1 ||
++        (mm->src[0]->type != GGML_TYPE_F16 && mm->src[0]->type != GGML_TYPE_F32 && mm->src[0]->type != GGML_TYPE_BF16) ||
++        mm->ne[1] <= (int64_t)mul_mat_vec_max_cols ||
++        ggml_nbytes(mm->src[0]) > ctx->device->properties.limits.maxStorageBufferRange) {
++        return -1;
++    }
++    const ggml_tensor * x = mm;
++    int j = node_idx + 1;
++    for (; j < cgraph->n_nodes && ggml_op_is_empty(cgraph->nodes[j]->op); ++j) {
++        const ggml_tensor * node = cgraph->nodes[j];
++        if (node->src[0] == x) {
++            if (node->view_src != mm || node->data != mm->data || ggml_node_get_use_count(cgraph, j) != 1) {
++                return -1;
++            }
++            x = node;
++        }
++    }
++    // op_srcs_fused_elementwise in the graph loop holds at most 13 nodes
++    if (j >= cgraph->n_nodes || j - node_idx > 12) {
++        return -1;
++    }
++    const ggml_tensor * add = cgraph->nodes[j];
++    if (add->op != GGML_OP_ADD || (add->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 || (add->src[0] != x && add->src[1] != x) ||
++        add->data != mm->data || add->type != GGML_TYPE_F32 || !ggml_is_contiguous(add) ||
++        ggml_nelements(add) != ggml_nelements(mm)) {
++        return -1;
++    }
++    const ggml_tensor * b = add->src[0] == x ? add->src[1] : add->src[0];
++    if (b->type != GGML_TYPE_F32 || !ggml_is_contiguous(b) || get_misalign_bytes(ctx, b) != 0) {
++        return -1;
++    }
++    int dim = -1;
++    uint64_t div = 1;
++    for (int k = 0; k < GGML_MAX_DIMS; ++k) {
++        if (b->ne[k] == 1) {
++            continue;
++        }
++        if (dim >= 0 || b->ne[k] != add->ne[k]) {
++            return -1;
++        }
++        dim = k;
++    }
++    for (int k = 0; k < dim; ++k) {
++        div *= add->ne[k];
++    }
++    if (div > UINT32_MAX) {
++        return -1;
++    }
++    *bias_out = b;
++    *bias_div_out = (uint32_t)div;
++    return j;
++}
++
++// Matches the gated residual sd.cpp builds after the DiT attention/MLP output projections and applies it in the
++// mul_mm store: mul_mat -> [views] -> mul(per-channel gate) -> add(resid).
++// (A fused gelu was tried for the MLP hidden layer: the epilogue made that matmul 50% slower on Vega, so it stays separate.)
++// Returns the index of the add, or -1. The result goes to the add's buffer.
++static int ggml_vk_can_fuse_mul_mat_epi(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx,
++                                        const ggml_tensor ** gate_out, const ggml_tensor ** resid_out, uint32_t * epi_out) {
++    const ggml_tensor * mm = cgraph->nodes[node_idx];
++    if (mm->op != GGML_OP_MUL_MAT || ctx->device->coopmat_support || ctx->device->coopmat2 ||
++        mm->type != GGML_TYPE_F32 || !ggml_is_contiguous(mm) || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++        ggml_node_get_use_count(cgraph, node_idx) != 1 ||
++        (mm->src[0]->type != GGML_TYPE_F16 && mm->src[0]->type != GGML_TYPE_F32 && mm->src[0]->type != GGML_TYPE_BF16) ||
++        mm->ne[1] <= (int64_t)mul_mat_vec_max_cols ||
++        ggml_nbytes(mm->src[0]) > ctx->device->properties.limits.maxStorageBufferRange) {
++        return -1;
++    }
++    // walk to the next real node, following no-op views of the running value
++    const ggml_tensor * x = mm;
++    int j = node_idx + 1;
++    auto next_real = [&]() {
++        for (; j < cgraph->n_nodes && ggml_op_is_empty(cgraph->nodes[j]->op); ++j) {
++            const ggml_tensor * node = cgraph->nodes[j];
++            if (node->src[0] == x) {
++                if (node->view_src == nullptr || node->data != x->data || ggml_node_get_use_count(cgraph, j) != 1) {
++                    return false;
++                }
++                x = node;
++            }
++        }
++        return j < cgraph->n_nodes && j - node_idx <= 12;
++    };
++    auto same_layout = [&](const ggml_tensor * t) {
++        return t->type == GGML_TYPE_F32 && ggml_is_contiguous(t) && ggml_nelements(t) == ggml_nelements(mm) &&
++               t->ne[0] == mm->ne[0] && get_misalign_bytes(ctx, t) == 0;
++    };
++    if (!next_real()) {
++        return -1;
++    }
++    const ggml_tensor * node = cgraph->nodes[j];
++    if (node->op != GGML_OP_MUL || node->src[0] != x || ggml_node_get_use_count(cgraph, j) != 1 || (node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++        !same_layout(node)) {
++        return -1;
++    }
++    const ggml_tensor * gate = node->src[1];
++    if (gate->type != GGML_TYPE_F32 || !ggml_is_contiguous(gate) || get_misalign_bytes(ctx, gate) != 0 ||
++        ggml_nelements(gate) != mm->ne[0] || gate->ne[0] != mm->ne[0]) {
++        return -1;
++    }
++    const ggml_tensor * mul = node;
++    x = mul;
++    ++j;
++    if (!next_real()) {
++        return -1;
++    }
++    const ggml_tensor * add = cgraph->nodes[j];
++    if (add->op != GGML_OP_ADD || (add->src[0] != mul && add->src[1] != mul) || !same_layout(add)) {
++        return -1;
++    }
++    const ggml_tensor * resid = add->src[0] == mul ? add->src[1] : add->src[0];
++    if (!same_layout(resid) || !ggml_are_same_shape(resid, add)) {
++        return -1;
++    }
++    *gate_out = gate;
++    *resid_out = resid;
++    *epi_out = MM_EPI_GATE | MM_EPI_RESID;
++    return j;
++}
++
+ static bool ggml_vk_can_fuse_unary_mul(const struct ggml_cgraph * cgraph, int unary_idx, int mul_idx) {
+     const ggml_tensor * unary = cgraph->nodes[unary_idx];
+     const ggml_tensor * mul = cgraph->nodes[mul_idx];
+@@ -14400,6 +14843,40 @@ bool ggml_vk_tensors_overlap(const ggml_tensor * a, const ggml_tensor * b, bool
+     return false;
+ }
+ 
++// node followed only by a contiguous cast to f16 of the same shape
++static bool ggml_vk_can_fuse_cast_f16(const struct ggml_cgraph * cgraph, int idx) {
++    if (idx + 1 >= cgraph->n_nodes || !ggml_node_has_n_uses(cgraph, idx, 1)) {
++        return false;
++    }
++    const ggml_tensor * node = cgraph->nodes[idx];
++    const ggml_tensor * cpy  = cgraph->nodes[idx + 1];
++    return cpy->op == GGML_OP_CPY && (cpy->flags & GGML_TENSOR_FLAG_COMPUTE) && cpy->src[0] == node &&
++           cpy->type == GGML_TYPE_F16 && ggml_are_same_shape(cpy, node) && ggml_is_contiguous(cpy) && cpy->view_src == nullptr;
++}
++
++static bool ggml_vk_can_fuse_rms_norm_mul_rope_apply(ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    // ggml_can_fuse wants equal shapes along the chain, but the rope_apply output is permuted
++    if (node_idx + 2 >= cgraph->n_nodes || !ggml_vk_can_fuse(ctx, cgraph, node_idx, { GGML_OP_RMS_NORM, GGML_OP_MUL }) ||
++        cgraph->nodes[node_idx + 2]->op != GGML_OP_ROPE_APPLY || (cgraph->nodes[node_idx + 2]->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
++        return false;
++    }
++    // the mul may be in place, i.e. a view of the rms_norm output, which is elided as well
++    const ggml_tensor * mul = cgraph->nodes[node_idx + 1];
++    if (ggml_node_get_use_count(cgraph, node_idx + 1) != 1 || (mul->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++        (mul->view_src != nullptr && mul->view_src != cgraph->nodes[node_idx])) {
++        return false;
++    }
++    const ggml_tensor * rms  = cgraph->nodes[node_idx];
++    const ggml_tensor * rope = cgraph->nodes[node_idx + 2];
++    const ggml_tensor * w    = mul->src[0] == rms ? mul->src[1] : mul->src[0];
++    // the norm, the weight and the rotation all act on one row; the output is permuted, so the fused shader
++    // must not write over its input (the overlap check rejects that; sd.cpp keeps the input alive until rope)
++    return rms->type == GGML_TYPE_F32 && rms->src[0]->type == GGML_TYPE_F32 && rms->src[0]->nb[0] == sizeof(float) &&
++           mul->type == GGML_TYPE_F32 && ggml_are_same_shape(mul, rms) &&
++           w->type == GGML_TYPE_F32 && ggml_is_contiguous(w) && ggml_nelements(w) == rms->ne[0] && w->ne[0] == rms->ne[0] &&
++           rope->src[0] == mul && rope->type == GGML_TYPE_F32;
++}
++
+ bool ggml_vk_can_fuse_rms_norm_mul_rope(ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph,
+                                                int node_idx) {
+     const ggml_tensor *rms = cgraph->nodes[node_idx + 0];
+@@ -14662,10 +15139,27 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         const char *fusion_string {};
+         if (!ctx->device->disable_fusion) {
+             uint32_t num_adds = ggml_vk_fuse_multi_add(ctx, cgraph, i);
++            int norm_fuse_idxs[4];
++            int norm_fuse_last;
++            const ggml_tensor * mm_bias;
++            uint32_t mm_bias_div;
++            const ggml_tensor * mm_epi_resid;
++            uint32_t mm_epi;
+             if (num_adds) {
+                 ctx->num_additional_fused_ops = num_adds - 1;
+                 fusion_string = "MULTI_ADD";
+                 std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
++            } else if ((norm_fuse_last = ggml_vk_can_fuse_group_norm_mul_add(ctx, cgraph, i, true, norm_fuse_idxs)) >= 0 ||
++                       (norm_fuse_last = ggml_vk_can_fuse_group_norm_mul_add(ctx, cgraph, i, false, norm_fuse_idxs)) >= 0 ||
++                       (norm_fuse_last = ggml_vk_can_fuse_norm_mul_add(ctx, cgraph, i, norm_fuse_idxs)) >= 0) {
++                // each workgroup reads its whole group/row before writing it, so exact aliasing with the input is safe
++                ctx->num_additional_fused_ops = norm_fuse_last - i;
++                fusion_string = "NORM_AFFINE";
++                if (cgraph->nodes[i]->op == GGML_OP_NORM && ggml_vk_can_fuse_cast_f16(cgraph, norm_fuse_last)) {
++                    ctx->num_additional_fused_ops++;
++                    fusion_string = "NORM_AFFINE_F16";
++                }
++                std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
+             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD, GGML_OP_ADD })) {
+                 ctx->num_additional_fused_ops = 2;
+                 fusion_string = "MUL_MAT_ADD_ADD";
+@@ -14677,6 +15171,16 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 fusion_string = "MUL_MAT_ADD";
+                 op_srcs_fused_elementwise[0] = false;
+                 op_srcs_fused_elementwise[1] = true;
++            } else if ((norm_fuse_last = ggml_vk_can_fuse_mul_mat_bias(ctx, cgraph, i, &mm_bias, &mm_bias_div)) >= 0) {
++                ctx->num_additional_fused_ops = norm_fuse_last - i;
++                fusion_string = "MUL_MAT_BIAS";
++                op_srcs_fused_elementwise[0] = false;
++                std::fill_n(op_srcs_fused_elementwise + 1, ctx->num_additional_fused_ops, true);
++            } else if ((norm_fuse_last = ggml_vk_can_fuse_mul_mat_epi(ctx, cgraph, i, &mm_bias, &mm_epi_resid, &mm_epi)) >= 0) {
++                ctx->num_additional_fused_ops = norm_fuse_last - i;
++                fusion_string = "MUL_MAT_GATE_RESID";
++                op_srcs_fused_elementwise[0] = false;
++                std::fill_n(op_srcs_fused_elementwise + 1, ctx->num_additional_fused_ops, true);
+             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT_ID, GGML_OP_ADD_ID, GGML_OP_MUL })) {
+                 ctx->num_additional_fused_ops = 2;
+                 fusion_string = "MUL_MAT_ID_ADD_ID_MUL";
+@@ -14705,6 +15209,15 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 op_srcs_fused_elementwise[2] = false;
+                 op_srcs_fused_elementwise[3] = false;
+                 op_srcs_fused_elementwise[4] = false;
++            } else if (ggml_vk_can_fuse_rms_norm_mul_rope_apply(ctx, cgraph, i)) {
++                ctx->num_additional_fused_ops = 2;
++                ctx->fused_rms_norm_mode = RMS_NORM_MUL_ROPE_APPLY;
++                fusion_string = "RMS_NORM_MUL_ROPE_APPLY";
++                if (ggml_vk_can_fuse_cast_f16(cgraph, i + 2)) {
++                    ctx->num_additional_fused_ops = 3;
++                    fusion_string = "RMS_NORM_MUL_ROPE_APPLY_F16";
++                }
++                std::fill_n(op_srcs_fused_elementwise, 4, false);
+             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE }) &&
+                        ggml_vk_can_fuse_rms_norm_mul_rope(ctx, cgraph, i)) {
+                 ctx->num_additional_fused_ops = 2;
+@@ -14746,6 +15259,15 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 // they are overwritten, and one workgroup per row. So close enough.
+                 op_srcs_fused_elementwise[0] = true;
+                 op_srcs_fused_elementwise[1] = true;
++            } else if (cgraph->nodes[i]->op == GGML_OP_UNARY && ggml_get_unary_op(cgraph->nodes[i]) == GGML_UNARY_OP_GELU &&
++                       cgraph->nodes[i]->type == GGML_TYPE_F32 && cgraph->nodes[i]->src[0]->type == GGML_TYPE_F32 &&
++                       ggml_is_contiguous(cgraph->nodes[i]->src[0]) && ggml_nelements(cgraph->nodes[i]) % 4 == 0 &&
++                       get_misalign_bytes(ctx, cgraph->nodes[i]->src[0]) == 0 && ggml_vk_can_fuse_cast_f16(cgraph, i) &&
++                       get_misalign_bytes(ctx, cgraph->nodes[i + 1]) == 0) {
++                ctx->num_additional_fused_ops = 1;
++                fusion_string = "GELU_F16";
++                op_srcs_fused_elementwise[0] = true;
++                op_srcs_fused_elementwise[1] = true;
+             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL })) {
+                 ctx->num_additional_fused_ops = 1;
+                 switch (ggml_get_unary_op(cgraph->nodes[i])) {
+@@ -14875,7 +15397,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 for (int k = 0; k <= ctx->num_additional_fused_ops; ++k) {
+                     for (uint32_t s = 0; s < GGML_MAX_SRC; ++s) {
+                         ggml_tensor *src = cgraph->nodes[i + k]->src[s];
+-                        if (!src || src->op == GGML_OP_NONE) {
++                        // ggml_cast keeps a self-reference in src[1]
++                        if (!src || src->op == GGML_OP_NONE || src == cgraph->nodes[i + k]) {
+                             continue;
+                         }
+                         if (ggml_vk_tensors_overlap(src, dst, op_srcs_fused_elementwise[k])) {
+@@ -16847,8 +17370,11 @@ std::string vk_perf_logger::get_node_fusion_name(const ggml_tensor * node, const
+                 ", N=N*OW*OH=" + std::to_string(size_N);
+         return fusion_str + name;
+     }
+-    if (node->op == GGML_OP_RMS_NORM) {
++    if (node->op == GGML_OP_RMS_NORM || node->op == GGML_OP_CONT || node->op == GGML_OP_CPY) {
+         std::string   name    = ggml_op_name(node->op);
++        if (node->op != GGML_OP_RMS_NORM) {
++            name += std::string(" ") + ggml_type_name(node->src[0]->type) + "->" + ggml_type_name(node->type);
++        }
+         name += "(" + std::to_string(node->ne[0]) + "," + std::to_string(node->ne[1]) + "," + std::to_string(node->ne[2]) + "," + std::to_string(node->ne[3]) + ")";
+         return fusion_str + name;
+     }
+diff --git a/src/ggml-vulkan/vulkan-shaders/flash_attn.comp b/src/ggml-vulkan/vulkan-shaders/flash_attn.comp
+index 2c5e859..400b4e0 100644
+--- a/src/ggml-vulkan/vulkan-shaders/flash_attn.comp
++++ b/src/ggml-vulkan/vulkan-shaders/flash_attn.comp
+@@ -32,6 +32,8 @@ const uint32_t rows_per_thread = Br / row_split;
+ const uint32_t cols_per_iter = WorkGroupSize / D_split / row_split;
+ const uint32_t cols_per_thread = Bc / cols_per_iter;
+ const uint32_t num_subgroups = SubGroupSize == 0 ? 0 : WorkGroupSize / SubGroupSize;
++// With row_split > 1 a row group can be smaller than a subgroup, so shuffles must not cross into the next row group
++const uint32_t row_reduce_size = SubGroupSize < WorkGroupSize / row_split ? SubGroupSize : WorkGroupSize / row_split;
+ 
+ 
+ layout (binding = 0) readonly buffer Q {float data_q[];};
+@@ -191,357 +193,20 @@ void main() {
+     uint32_t mask_opt_idx = ~0;
+     uint32_t mask_opt_bits = 0;
+ 
++    // Only the last KV block can run past KV, so full blocks get a copy of the loop without bounds checks.
++    const uint32_t full_end_j = (KV_bounds_check && !USE_SPARSE) ? max(start_j, min(end_j, KV / Bc)) : start_j;
++#define FA_KV_CHECK false
+     [[dont_unroll]]
+-    for (uint32_t j = start_j; j < end_j; ++j) {
+-        if (MASK_ENABLE) {
+-            if (USE_MASK_OPT && mask_opt_idx != j / 16) {
+-                mask_opt_idx = j / 16;
+-                mask_opt = data_mask_opt[mo_offset + mask_opt_idx];
+-            }
+-            mask_opt_bits = (mask_opt >> ((j % 16) * 2)) & 0x3;
+-            if (mask_opt_bits == MASK_OPT_ALL_NEG_INF) {
+-                // skip this block
+-                continue;
+-            }
+-            // Only load if the block is not all zeros
+-            if (mask_opt_bits != MASK_OPT_ALL_ZERO) {
+-                bool nem1_bounds_check = !(p.gqa_ratio > 1) && (p.nem1 % Br) != 0;
+-
+-                float max_mask = NEG_FLT_MAX_OVER_2;
+-                barrier();
+-                [[unroll]] for (uint32_t idx = 0; idx < Bc * Br; idx += gl_WorkGroupSize.x) {
+-                    uint32_t c = (idx + tid) % Bc;
+-                    uint32_t r = (idx + tid) / Bc;
+-                    if (idx + tid < Bc * Br) {
+-                        uint32_t kcol;
+-                        bool kv_active = fa_kv_index(j * Bc + c, kcol);
+-                        if (kv_active && (!nem1_bounds_check || i * Br + r < p.nem1)) {
+-                            FLOAT_TYPE m = FLOAT_TYPE(data_m[m_offset + (i * Br + r) * m_stride + kcol]);
+-                            masksh[c * masksh_stride + r] = m;
+-                            max_mask = max(max_mask, float(m));
+-                        } else {
+-                            masksh[c * masksh_stride + r] = USE_SPARSE ? FLOAT_TYPE(NEG_FLT_MAX_OVER_2) : FLOAT_TYPE(0);
+-                        }
+-                    }
+-                }
+-                // skip the block if the mask is entirely -inf
+-                bool all_less = subgroupAll(max_mask <= NEG_FLT_MAX_OVER_2);
+-                barrier();
+-                if (gl_SubgroupInvocationID == 0) {
+-                    tmpsh[gl_SubgroupID] = all_less ? NEG_FLT_MAX_OVER_2 : 0.0f;
+-                }
+-                barrier();
+-                [[unroll]] for (uint s = 0; s < gl_NumSubgroups; ++s) {
+-                    max_mask = max(max_mask, tmpsh[s]);
+-                }
+-                if (max_mask <= NEG_FLT_MAX_OVER_2) {
+-                    continue;
+-                }
+-            }
+-        }
+-
+-        ACC_TYPE Sf[rows_per_thread][cols_per_thread];
+-        [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-                Sf[r][c] = ACC_TYPE(0.0);
+-            }
+-        }
+-
+-        if (SHMEM_STAGING != 0) {
+-            barrier();
+-#ifndef MMQ
+-            [[unroll]] for (uint32_t idx = 0; idx < Bc * HSK / 4; idx += gl_WorkGroupSize.x) {
+-                uint32_t d = (idx + tid) % (HSK / 4);
+-                uint32_t c = (idx + tid) / (HSK / 4);
+-                if (idx + gl_WorkGroupSize.x <= Bc * HSK / 4 || c < Bc) {
+-                    FLOAT_TYPEV4 K_Tf = FLOAT_TYPEV4(0);
+-                    uint32_t kcol;
+-                    if (fa_kv_index(j * Bc + c, kcol)) {
+-                        if (USE_DECODE_K) {
+-                            uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * d;
+-                            uint ib = coord / BLOCK_SIZE_K;
+-                            uint iqs = (coord % BLOCK_SIZE_K);
+-                            K_Tf = dequantize4(ib, iqs, k_offset, BINDING_IDX_K);
+-                        } else {
+-                            K_Tf = FLOAT_TYPEV4(data_kv4[k_offset / 4 + kcol * k_stride / 4 + d]);
+-                        }
+-                    }
+-
+-                    kvsh[c * kvsh_stride + d] = K_Tf;
+-                }
+-            }
+-#else // MMQ
+-            const uint ints_per_block = 8u / fa_quant_r_mmq(FaTypeK);
+-            const uint quant_iters = Bc * HSK / 32 * ints_per_block;
+-            [[unroll]] for (uint32_t idx = 0; idx < quant_iters; idx += gl_WorkGroupSize.x) {
+-                const uint32_t iqs = (idx + tid) % ints_per_block;
+-                const uint32_t ib = (idx + tid) / ints_per_block;
+-                const uint32_t c = ib / (HSK / 32);
+-                const uint32_t block = ib % (HSK / 32);
+-                if (idx + gl_WorkGroupSize.x <= quant_iters || c < Bc) {
+-                    const uint buf_ib = c * qf_stride + block;
+-                    uint32_t kcol;
+-                    if (fa_kv_index(j * Bc + c, kcol)) {
+-                        const uint global_ib = kcol * k_stride + block;
+-                        k_block_to_shmem(buf_ib, global_ib, iqs, k_offset);
+-                    } else {
+-                        k_block_to_shmem_zero(buf_ib, iqs);
+-                    }
+-                }
+-            }
+-#endif // MMQ
+-            barrier();
+-        }
+-
+-#ifndef MMQ
+-        // More d iterations means Q register caching becomes relevant
+-        // Few iterations means the additional registers needed are worse than the speed-up from caching
+-        if (HSK_per_thread / 4 > 4) {
+-            [[unroll]] for (uint32_t d = 0; d < HSK_per_thread / 4; ++d) {
+-                FLOAT_TYPEV4 Q_cache[rows_per_thread];
+-                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                    Q_cache[r] = Qf[tile_row(r) * qf_stride + d * D_split + d_tid];
+-                }
+-
+-                [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-                    uint32_t kcol;
+-                    bool kv_active = fa_kv_index(j * Bc + c * cols_per_iter + col_tid, kcol);
+-                    if (!kv_active) {
+-                        continue;
+-                    }
+-
+-                    FLOAT_TYPEV4 K_Tf;
+-                    if (SHMEM_STAGING != 0) {
+-                        K_Tf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
+-                    } else if (USE_DECODE_K) {
+-                        uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * (d * D_split + d_tid);
+-                        uint ib = coord / BLOCK_SIZE_K;
+-                        uint iqs = (coord % BLOCK_SIZE_K);
+-                        K_Tf = dequantize4(ib, iqs, k_offset, BINDING_IDX_K);
+-                    } else {
+-                        K_Tf = FLOAT_TYPEV4(data_kv4[k_offset / 4 + kcol * k_stride / 4 + d * D_split + d_tid]);
+-                    }
+-                    [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                        Sf[r][c] = dot_product(Q_cache[r], K_Tf, Sf[r][c]);
+-                    }
+-                }
+-            }
+-        } else {
+-            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-                uint32_t kcol;
+-                bool kv_active = fa_kv_index(j * Bc + c * cols_per_iter + col_tid, kcol);
+-                if (!kv_active) {
+-                    continue;
+-                }
+-
+-                [[unroll]] for (uint32_t d = 0; d < HSK_per_thread / 4; ++d) {
+-                    FLOAT_TYPEV4 K_Tf;
+-                    if (SHMEM_STAGING != 0) {
+-                        K_Tf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
+-                    } else if (USE_DECODE_K) {
+-                        uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * (d * D_split + d_tid);
+-                        uint ib = coord / BLOCK_SIZE_K;
+-                        uint iqs = (coord % BLOCK_SIZE_K);
+-                        K_Tf = dequantize4(ib, iqs, k_offset, BINDING_IDX_K);
+-                    } else {
+-                        K_Tf = FLOAT_TYPEV4(data_kv4[k_offset / 4 + kcol * k_stride / 4 + d * D_split + d_tid]);
+-                    }
+-                    [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                        Sf[r][c] = dot_product(Qf[tile_row(r) * qf_stride + d * D_split + d_tid], K_Tf, Sf[r][c]);
+-                    }
+-                }
+-            }
+-        }
+-#else // MMQ
+-        const uint hsk4 = HSK_per_thread / 4;
+-        const uint d_per_step = (hsk4 % 8 == 0) ? 8 :
+-                                (hsk4 % 4 == 0) ? 4 :
+-                                (hsk4 % 2 == 0) ? 2 : 1;
+-
+-        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-            uint32_t kcol;
+-            if (!fa_kv_index(j * Bc + c * cols_per_iter + col_tid, kcol)) {
+-                continue;
+-            }
+-
+-            [[unroll]] for (uint32_t d_block = 0; d_block < HSK_per_thread / 4; d_block += d_per_step) {
+-                int32_t k_quants[d_per_step];
+-                ACC_TYPEV2 k_dm;
+-
+-                // Q4_*/Q5_* take the block-8 fast path when one step covers a full
+-                // block; Q8_0 always goes through the per-int get_k_qs* helpers
+-                // (its qs is byte-packed, not nibble-packed).
+-                const bool block8_fast = (d_per_step == 8) && (FaTypeK != GGML_TYPE_Q8_0);
+-
+-                if (SHMEM_STAGING != 0) {
+-                    const uint k_block_idx = (d_tid * (HSK_per_thread / 4) + d_block) / 8;
+-                    const uint buf_ib = (c * cols_per_iter + col_tid) * qf_stride + k_block_idx;
+-                    k_dm = ACC_TYPEV2(kblocksh[buf_ib].dm);
+-
+-                    if (block8_fast) {
+-                        const bool has_qh = (FaTypeK == GGML_TYPE_Q5_0) || (FaTypeK == GGML_TYPE_Q5_1);
+-                        [[unroll]] for (uint32_t d = 0; d < 4; d++) {
+-                            uint vui = kblocksh[buf_ib].qs[d];
+-                            k_quants[d    ] = int32_t( vui       & 0x0F0F0F0F);
+-                            k_quants[d + 4] = int32_t((vui >> 4) & 0x0F0F0F0F);
+-                            if (has_qh) {
+-                                uint qh_lo = (kblocksh[buf_ib].qh >> (d * 4)) & 0xF;
+-                                uint qh_hi = (kblocksh[buf_ib].qh >> (d * 4 + 16)) & 0xF;
+-                                k_quants[d    ] |= int32_t((qh_lo * 0x02040810u) & 0x10101010u);
+-                                k_quants[d + 4] |= int32_t((qh_hi * 0x02040810u) & 0x10101010u);
+-                            }
+-                        }
+-                    } else {
+-                        [[unroll]] for (uint32_t d = 0; d < d_per_step; d++) {
+-                            k_quants[d] = get_k_qs_shmem(buf_ib, (d_tid * (HSK_per_thread / 4) + d_block) % 8 + d);
+-                        }
+-                    }
+-                } else {
+-                    const uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * (d_tid * (HSK_per_thread / 4) + d_block);
+-                    const uint ib = coord / BLOCK_SIZE_K;
+-                    const uint iqs = (coord % BLOCK_SIZE_K);
+-
+-                    k_dm = ACC_TYPEV2(get_k_scale(ib, k_offset));
+-
+-                    if (block8_fast) {
+-                        fa_k_qs_block8 blk = get_k_qs_block8(ib, k_offset);
+-                        [[unroll]] for (uint32_t d = 0; d < 8; d++) {
+-                            k_quants[d] = blk.qs[d];
+-                        }
+-                    } else {
+-                        [[unroll]] for (uint32_t d = 0; d < d_per_step; d++) {
+-                            k_quants[d] = get_k_qs(ib, iqs + d * 4, k_offset);
+-                        }
+-                    }
+-                }
+-
+-                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                    const uint qib = tile_row(r) * qf_stride + (d_tid * (HSK_per_thread / 4) + d_block) / 8;
+-                    const uint qiqs = (d_tid * (HSK_per_thread / 4) + d_block) % 8;
+-
+-                    int32_t acc = 0;
+-                    [[unroll]] for (uint32_t d = 0; d < d_per_step; d++) {
+-                        acc += dotPacked4x8EXT(Qf[qib].qs[qiqs + d], k_quants[d]);
+-                    }
+-
+-                    Sf[r][c] += ACC_TYPE(acc) * ACC_TYPE(Qf[qib].ds.x) * k_dm.x;
+-                    if ((d_tid * (HSK_per_thread / 4) + d_block) % 8 == 0) {
+-                        Sf[r][c] += k_dot_correction(qib, k_dm);
+-                    }
+-                }
+-            }
+-        }
+-#endif // MMQ
+-
+-        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-            // Compute sum across the D_split
+-            [[unroll]] for (uint s = D_split / 2; s > 0; s >>= 1) {
+-                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                    Sf[r][c] += subgroupShuffleXor(Sf[r][c], s);
+-                }
+-            }
+-        }
+-
+-        if (LOGIT_SOFTCAP) {
+-            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-                    Sf[r][c] = ACC_TYPE(p.logit_softcap * tanh(Sf[r][c]));
+-                }
+-            }
+-        }
+-
+-        if (MASK_ENABLE && mask_opt_bits != MASK_OPT_ALL_ZERO) {
+-            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                    FLOAT_TYPE mvf = masksh[(c * cols_per_iter + col_tid) * masksh_stride + tile_row(r)];
+-
+-                    Sf[r][c] += slope[r]*mvf;
+-                }
+-            }
+-        }
+-
+-        float eMf[rows_per_thread];
+-        [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-            float rowmaxf = NEG_FLT_MAX_OVER_2;
+-            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-                if (KV_bounds_check && j * Bc + c * cols_per_iter + col_tid >= KV) {
+-                    continue;
+-                }
+-                rowmaxf = max(rowmaxf, float(Sf[r][c]));
+-            }
+-            rowmaxf += FATTN_KQ_MAX_OFFSET;
+-            float Moldf = Mf[r];
+-
+-            // M = max(rowmax, Mold)
+-            // P = e^(S - M)
+-            // eM = e^(Mold - M)
+-            Mf[r] = max(rowmaxf, Moldf);
+-            eMf[r] = exp(Moldf - Mf[r]);
+-            Lf[r] = eMf[r]*Lf[r];
+-        }
+-
+-        [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
+-            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                Of[r][d] = FLOAT_TYPE(eMf[r]) * Of[r][d];
+-            }
+-        }
+-
+-        if (SHMEM_STAGING != 0) {
+-            barrier();
+-            [[unroll]] for (uint32_t idx = 0; idx < Bc * HSV / 4; idx += gl_WorkGroupSize.x) {
+-                uint32_t d = (idx + tid) % (HSV / 4);
+-                uint32_t c = (idx + tid) / (HSV / 4);
+-                if (idx + gl_WorkGroupSize.x <= Bc * HSV / 4 || c < Bc) {
+-                    FLOAT_TYPEV4 V_Tf = FLOAT_TYPEV4(0);
+-                    uint32_t vcol;
+-                    if (fa_kv_index(j * Bc + c, vcol)) {
+-                        if (USE_DECODE_V) {
+-                            uint coord = vcol * v_stride * BLOCK_SIZE_V + 4 * d;
+-                            uint ib = coord / BLOCK_SIZE_V;
+-                            uint iqs = (coord % BLOCK_SIZE_V);
+-                            V_Tf = dequantize4(ib, iqs, v_offset, BINDING_IDX_V);
+-                        } else {
+-                            V_Tf = FLOAT_TYPEV4(data_vv4[v_offset / 4 + vcol * v_stride / 4 + d]);
+-                        }
+-                    }
+-
+-                    kvsh[c * kvsh_stride + d] = V_Tf;
+-                }
+-            }
+-            barrier();
+-        }
+-
+-        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+-            uint32_t vcol;
+-            bool kv_active = fa_kv_index(j * Bc + c * cols_per_iter + col_tid, vcol);
+-            if (!kv_active) {
+-                continue;
+-            }
+-
+-            FLOAT_TYPE Pf[rows_per_thread];
+-            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                Pf[r] = FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r]));
+-                Lf[r] += Pf[r];
+-            }
+-
+-            [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
+-                FLOAT_TYPEV4 Vf;
+-                if (SHMEM_STAGING != 0) {
+-                    Vf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
+-                } else if (USE_DECODE_V) {
+-                    uint coord = vcol * v_stride * BLOCK_SIZE_V + 4 * (d * D_split + d_tid);
+-                    uint ib = coord / BLOCK_SIZE_V;
+-                    uint iqs = (coord % BLOCK_SIZE_V);
+-                    Vf = dequantize4(ib, iqs, v_offset, BINDING_IDX_V);
+-                } else {
+-                    Vf = FLOAT_TYPEV4(data_vv4[v_offset / 4 + vcol * v_stride / 4 + d * D_split + d_tid]);
+-                }
+-                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+-                    Of[r][d] += FLOAT_TYPEV4(Pf[r] * Vf);
+-                }
+-            }
+-        }
++    for (uint32_t j = start_j; j < full_end_j; ++j) {
++#include "flash_attn_block.glsl"
++    }
++#undef FA_KV_CHECK
++#define FA_KV_CHECK KV_bounds_check
++    [[dont_unroll]]
++    for (uint32_t j = full_end_j; j < end_j; ++j) {
++#include "flash_attn_block.glsl"
+     }
++#undef FA_KV_CHECK
+ 
+     // prevent race on tmpsh
+     barrier();
+@@ -553,7 +218,7 @@ void main() {
+ 
+         // Compute max across the row
+         if (SubGroupSize > 0) {
+-            [[unroll]] for (uint s = D_split; s < SubGroupSize; s *= 2) {
++            [[unroll]] for (uint s = D_split; s < row_reduce_size; s *= 2) {
+                 rowmaxf = max(rowmaxf, subgroupShuffleXor(rowmaxf, s));
+             }
+             if (row_split == 1) {
+@@ -592,7 +257,7 @@ void main() {
+ 
+         // Compute sum across the row
+         if (SubGroupSize > 0) {
+-            [[unroll]] for (uint s = D_split; s < SubGroupSize; s *= 2) {
++            [[unroll]] for (uint s = D_split; s < row_reduce_size; s *= 2) {
+                 Lf[r] += subgroupShuffleXor(Lf[r], s);
+             }
+             if (row_split == 1) {
+@@ -623,7 +288,7 @@ void main() {
+             Of[r][d] = FLOAT_TYPE(eMf) * Of[r][d];
+ 
+             if (SubGroupSize > 0) {
+-                [[unroll]] for (uint s = D_split; s < SubGroupSize; s *= 2) {
++                [[unroll]] for (uint s = D_split; s < row_reduce_size; s *= 2) {
+                     if (!OLD_AMD_WINDOWS) {
+                         Of[r][d] += subgroupShuffleXor(Of[r][d], s);
+                     } else {
+diff --git a/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl b/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl
+index 2e0e23b..c7fa1e6 100644
+--- a/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl
++++ b/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl
+@@ -227,7 +227,7 @@ void init_indices()
+ }
+ 
+ // Resolve a linear KV slot to a real column; false for inactive (sparse padding/-1, or dense OOB).
+-bool fa_kv_index(uint lin, out uint kv_col) {
++bool fa_kv_index_c(const bool check, uint lin, out uint kv_col) {
+     if (USE_SPARSE) {
+         if (lin >= p.split_kv) {
+             kv_col = 0;
+@@ -238,7 +238,11 @@ bool fa_kv_index(uint lin, out uint kv_col) {
+         return idx >= 0;
+     }
+     kv_col = lin;
+-    return !KV_bounds_check || lin < KV;
++    return !check || lin < KV;
++}
++
++bool fa_kv_index(uint lin, out uint kv_col) {
++    return fa_kv_index_c(KV_bounds_check, lin, kv_col);
+ }
+ 
+ // Bias applied to softmax to stay in fp16 range.
+diff --git a/src/ggml-vulkan/vulkan-shaders/flash_attn_block.glsl b/src/ggml-vulkan/vulkan-shaders/flash_attn_block.glsl
+new file mode 100644
+index 0000000..5dd63fb
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/flash_attn_block.glsl
+@@ -0,0 +1,349 @@
++// Body of the KV-block loop in flash_attn.comp, included once per value of FA_KV_CHECK.
++        if (MASK_ENABLE) {
++            if (USE_MASK_OPT && mask_opt_idx != j / 16) {
++                mask_opt_idx = j / 16;
++                mask_opt = data_mask_opt[mo_offset + mask_opt_idx];
++            }
++            mask_opt_bits = (mask_opt >> ((j % 16) * 2)) & 0x3;
++            if (mask_opt_bits == MASK_OPT_ALL_NEG_INF) {
++                // skip this block
++                continue;
++            }
++            // Only load if the block is not all zeros
++            if (mask_opt_bits != MASK_OPT_ALL_ZERO) {
++                bool nem1_bounds_check = !(p.gqa_ratio > 1) && (p.nem1 % Br) != 0;
++
++                float max_mask = NEG_FLT_MAX_OVER_2;
++                barrier();
++                [[unroll]] for (uint32_t idx = 0; idx < Bc * Br; idx += gl_WorkGroupSize.x) {
++                    uint32_t c = (idx + tid) % Bc;
++                    uint32_t r = (idx + tid) / Bc;
++                    if (idx + tid < Bc * Br) {
++                        uint32_t kcol;
++                        bool kv_active = fa_kv_index_c(FA_KV_CHECK, j * Bc + c, kcol);
++                        if (kv_active && (!nem1_bounds_check || i * Br + r < p.nem1)) {
++                            FLOAT_TYPE m = FLOAT_TYPE(data_m[m_offset + (i * Br + r) * m_stride + kcol]);
++                            masksh[c * masksh_stride + r] = m;
++                            max_mask = max(max_mask, float(m));
++                        } else {
++                            masksh[c * masksh_stride + r] = USE_SPARSE ? FLOAT_TYPE(NEG_FLT_MAX_OVER_2) : FLOAT_TYPE(0);
++                        }
++                    }
++                }
++                // skip the block if the mask is entirely -inf
++                bool all_less = subgroupAll(max_mask <= NEG_FLT_MAX_OVER_2);
++                barrier();
++                if (gl_SubgroupInvocationID == 0) {
++                    tmpsh[gl_SubgroupID] = all_less ? NEG_FLT_MAX_OVER_2 : 0.0f;
++                }
++                barrier();
++                [[unroll]] for (uint s = 0; s < gl_NumSubgroups; ++s) {
++                    max_mask = max(max_mask, tmpsh[s]);
++                }
++                if (max_mask <= NEG_FLT_MAX_OVER_2) {
++                    continue;
++                }
++            }
++        }
++
++        ACC_TYPE Sf[rows_per_thread][cols_per_thread];
++        [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++                Sf[r][c] = ACC_TYPE(0.0);
++            }
++        }
++
++        if (SHMEM_STAGING != 0) {
++            barrier();
++#ifndef MMQ
++            [[unroll]] for (uint32_t idx = 0; idx < Bc * HSK / 4; idx += gl_WorkGroupSize.x) {
++                uint32_t d = (idx + tid) % (HSK / 4);
++                uint32_t c = (idx + tid) / (HSK / 4);
++                if (idx + gl_WorkGroupSize.x <= Bc * HSK / 4 || c < Bc) {
++                    FLOAT_TYPEV4 K_Tf = FLOAT_TYPEV4(0);
++                    uint32_t kcol;
++                    if (fa_kv_index_c(FA_KV_CHECK, j * Bc + c, kcol)) {
++                        if (USE_DECODE_K) {
++                            uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * d;
++                            uint ib = coord / BLOCK_SIZE_K;
++                            uint iqs = (coord % BLOCK_SIZE_K);
++                            K_Tf = dequantize4(ib, iqs, k_offset, BINDING_IDX_K);
++                        } else {
++                            K_Tf = FLOAT_TYPEV4(data_kv4[k_offset / 4 + kcol * k_stride / 4 + d]);
++                        }
++                    }
++
++                    kvsh[c * kvsh_stride + d] = K_Tf;
++                }
++            }
++#else // MMQ
++            const uint ints_per_block = 8u / fa_quant_r_mmq(FaTypeK);
++            const uint quant_iters = Bc * HSK / 32 * ints_per_block;
++            [[unroll]] for (uint32_t idx = 0; idx < quant_iters; idx += gl_WorkGroupSize.x) {
++                const uint32_t iqs = (idx + tid) % ints_per_block;
++                const uint32_t ib = (idx + tid) / ints_per_block;
++                const uint32_t c = ib / (HSK / 32);
++                const uint32_t block = ib % (HSK / 32);
++                if (idx + gl_WorkGroupSize.x <= quant_iters || c < Bc) {
++                    const uint buf_ib = c * qf_stride + block;
++                    uint32_t kcol;
++                    if (fa_kv_index_c(FA_KV_CHECK, j * Bc + c, kcol)) {
++                        const uint global_ib = kcol * k_stride + block;
++                        k_block_to_shmem(buf_ib, global_ib, iqs, k_offset);
++                    } else {
++                        k_block_to_shmem_zero(buf_ib, iqs);
++                    }
++                }
++            }
++#endif // MMQ
++            barrier();
++        }
++
++#ifndef MMQ
++        // More d iterations means Q register caching becomes relevant
++        // Few iterations means the additional registers needed are worse than the speed-up from caching
++        if (HSK_per_thread / 4 > 4) {
++            [[unroll]] for (uint32_t d = 0; d < HSK_per_thread / 4; ++d) {
++                FLOAT_TYPEV4 Q_cache[rows_per_thread];
++                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                    Q_cache[r] = Qf[tile_row(r) * qf_stride + d * D_split + d_tid];
++                }
++
++                [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++                    uint32_t kcol;
++                    bool kv_active = fa_kv_index_c(FA_KV_CHECK, j * Bc + c * cols_per_iter + col_tid, kcol);
++                    if (!kv_active) {
++                        continue;
++                    }
++
++                    FLOAT_TYPEV4 K_Tf;
++                    if (SHMEM_STAGING != 0) {
++                        K_Tf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
++                    } else if (USE_DECODE_K) {
++                        uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * (d * D_split + d_tid);
++                        uint ib = coord / BLOCK_SIZE_K;
++                        uint iqs = (coord % BLOCK_SIZE_K);
++                        K_Tf = dequantize4(ib, iqs, k_offset, BINDING_IDX_K);
++                    } else {
++                        K_Tf = FLOAT_TYPEV4(data_kv4[k_offset / 4 + kcol * k_stride / 4 + d * D_split + d_tid]);
++                    }
++                    [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                        Sf[r][c] = dot_product(Q_cache[r], K_Tf, Sf[r][c]);
++                    }
++                }
++            }
++        } else {
++            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++                uint32_t kcol;
++                bool kv_active = fa_kv_index_c(FA_KV_CHECK, j * Bc + c * cols_per_iter + col_tid, kcol);
++                if (!kv_active) {
++                    continue;
++                }
++
++                [[unroll]] for (uint32_t d = 0; d < HSK_per_thread / 4; ++d) {
++                    FLOAT_TYPEV4 K_Tf;
++                    if (SHMEM_STAGING != 0) {
++                        K_Tf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
++                    } else if (USE_DECODE_K) {
++                        uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * (d * D_split + d_tid);
++                        uint ib = coord / BLOCK_SIZE_K;
++                        uint iqs = (coord % BLOCK_SIZE_K);
++                        K_Tf = dequantize4(ib, iqs, k_offset, BINDING_IDX_K);
++                    } else {
++                        K_Tf = FLOAT_TYPEV4(data_kv4[k_offset / 4 + kcol * k_stride / 4 + d * D_split + d_tid]);
++                    }
++                    [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                        Sf[r][c] = dot_product(Qf[tile_row(r) * qf_stride + d * D_split + d_tid], K_Tf, Sf[r][c]);
++                    }
++                }
++            }
++        }
++#else // MMQ
++        const uint hsk4 = HSK_per_thread / 4;
++        const uint d_per_step = (hsk4 % 8 == 0) ? 8 :
++                                (hsk4 % 4 == 0) ? 4 :
++                                (hsk4 % 2 == 0) ? 2 : 1;
++
++        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++            uint32_t kcol;
++            if (!fa_kv_index_c(FA_KV_CHECK, j * Bc + c * cols_per_iter + col_tid, kcol)) {
++                continue;
++            }
++
++            [[unroll]] for (uint32_t d_block = 0; d_block < HSK_per_thread / 4; d_block += d_per_step) {
++                int32_t k_quants[d_per_step];
++                ACC_TYPEV2 k_dm;
++
++                // Q4_*/Q5_* take the block-8 fast path when one step covers a full
++                // block; Q8_0 always goes through the per-int get_k_qs* helpers
++                // (its qs is byte-packed, not nibble-packed).
++                const bool block8_fast = (d_per_step == 8) && (FaTypeK != GGML_TYPE_Q8_0);
++
++                if (SHMEM_STAGING != 0) {
++                    const uint k_block_idx = (d_tid * (HSK_per_thread / 4) + d_block) / 8;
++                    const uint buf_ib = (c * cols_per_iter + col_tid) * qf_stride + k_block_idx;
++                    k_dm = ACC_TYPEV2(kblocksh[buf_ib].dm);
++
++                    if (block8_fast) {
++                        const bool has_qh = (FaTypeK == GGML_TYPE_Q5_0) || (FaTypeK == GGML_TYPE_Q5_1);
++                        [[unroll]] for (uint32_t d = 0; d < 4; d++) {
++                            uint vui = kblocksh[buf_ib].qs[d];
++                            k_quants[d    ] = int32_t( vui       & 0x0F0F0F0F);
++                            k_quants[d + 4] = int32_t((vui >> 4) & 0x0F0F0F0F);
++                            if (has_qh) {
++                                uint qh_lo = (kblocksh[buf_ib].qh >> (d * 4)) & 0xF;
++                                uint qh_hi = (kblocksh[buf_ib].qh >> (d * 4 + 16)) & 0xF;
++                                k_quants[d    ] |= int32_t((qh_lo * 0x02040810u) & 0x10101010u);
++                                k_quants[d + 4] |= int32_t((qh_hi * 0x02040810u) & 0x10101010u);
++                            }
++                        }
++                    } else {
++                        [[unroll]] for (uint32_t d = 0; d < d_per_step; d++) {
++                            k_quants[d] = get_k_qs_shmem(buf_ib, (d_tid * (HSK_per_thread / 4) + d_block) % 8 + d);
++                        }
++                    }
++                } else {
++                    const uint coord = kcol * k_stride * BLOCK_SIZE_K + 4 * (d_tid * (HSK_per_thread / 4) + d_block);
++                    const uint ib = coord / BLOCK_SIZE_K;
++                    const uint iqs = (coord % BLOCK_SIZE_K);
++
++                    k_dm = ACC_TYPEV2(get_k_scale(ib, k_offset));
++
++                    if (block8_fast) {
++                        fa_k_qs_block8 blk = get_k_qs_block8(ib, k_offset);
++                        [[unroll]] for (uint32_t d = 0; d < 8; d++) {
++                            k_quants[d] = blk.qs[d];
++                        }
++                    } else {
++                        [[unroll]] for (uint32_t d = 0; d < d_per_step; d++) {
++                            k_quants[d] = get_k_qs(ib, iqs + d * 4, k_offset);
++                        }
++                    }
++                }
++
++                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                    const uint qib = tile_row(r) * qf_stride + (d_tid * (HSK_per_thread / 4) + d_block) / 8;
++                    const uint qiqs = (d_tid * (HSK_per_thread / 4) + d_block) % 8;
++
++                    int32_t acc = 0;
++                    [[unroll]] for (uint32_t d = 0; d < d_per_step; d++) {
++                        acc += dotPacked4x8EXT(Qf[qib].qs[qiqs + d], k_quants[d]);
++                    }
++
++                    Sf[r][c] += ACC_TYPE(acc) * ACC_TYPE(Qf[qib].ds.x) * k_dm.x;
++                    if ((d_tid * (HSK_per_thread / 4) + d_block) % 8 == 0) {
++                        Sf[r][c] += k_dot_correction(qib, k_dm);
++                    }
++                }
++            }
++        }
++#endif // MMQ
++
++        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++            // Compute sum across the D_split
++            [[unroll]] for (uint s = D_split / 2; s > 0; s >>= 1) {
++                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                    Sf[r][c] += subgroupShuffleXor(Sf[r][c], s);
++                }
++            }
++        }
++
++        if (LOGIT_SOFTCAP) {
++            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++                    Sf[r][c] = ACC_TYPE(p.logit_softcap * tanh(Sf[r][c]));
++                }
++            }
++        }
++
++        if (MASK_ENABLE && mask_opt_bits != MASK_OPT_ALL_ZERO) {
++            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                    FLOAT_TYPE mvf = masksh[(c * cols_per_iter + col_tid) * masksh_stride + tile_row(r)];
++
++                    Sf[r][c] += slope[r]*mvf;
++                }
++            }
++        }
++
++        float eMf[rows_per_thread];
++        [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++            float rowmaxf = NEG_FLT_MAX_OVER_2;
++            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++                if (FA_KV_CHECK && j * Bc + c * cols_per_iter + col_tid >= KV) {
++                    continue;
++                }
++                rowmaxf = max(rowmaxf, float(Sf[r][c]));
++            }
++            rowmaxf += FATTN_KQ_MAX_OFFSET;
++            float Moldf = Mf[r];
++
++            // M = max(rowmax, Mold)
++            // P = e^(S - M)
++            // eM = e^(Mold - M)
++            Mf[r] = max(rowmaxf, Moldf);
++            eMf[r] = exp(Moldf - Mf[r]);
++            Lf[r] = eMf[r]*Lf[r];
++        }
++
++        [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
++            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                Of[r][d] = FLOAT_TYPE(eMf[r]) * Of[r][d];
++            }
++        }
++
++        if (SHMEM_STAGING != 0) {
++            barrier();
++            [[unroll]] for (uint32_t idx = 0; idx < Bc * HSV / 4; idx += gl_WorkGroupSize.x) {
++                uint32_t d = (idx + tid) % (HSV / 4);
++                uint32_t c = (idx + tid) / (HSV / 4);
++                if (idx + gl_WorkGroupSize.x <= Bc * HSV / 4 || c < Bc) {
++                    FLOAT_TYPEV4 V_Tf = FLOAT_TYPEV4(0);
++                    uint32_t vcol;
++                    if (fa_kv_index_c(FA_KV_CHECK, j * Bc + c, vcol)) {
++                        if (USE_DECODE_V) {
++                            uint coord = vcol * v_stride * BLOCK_SIZE_V + 4 * d;
++                            uint ib = coord / BLOCK_SIZE_V;
++                            uint iqs = (coord % BLOCK_SIZE_V);
++                            V_Tf = dequantize4(ib, iqs, v_offset, BINDING_IDX_V);
++                        } else {
++                            V_Tf = FLOAT_TYPEV4(data_vv4[v_offset / 4 + vcol * v_stride / 4 + d]);
++                        }
++                    }
++
++                    kvsh[c * kvsh_stride + d] = V_Tf;
++                }
++            }
++            barrier();
++        }
++
++        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
++            uint32_t vcol;
++            bool kv_active = fa_kv_index_c(FA_KV_CHECK, j * Bc + c * cols_per_iter + col_tid, vcol);
++            if (!kv_active) {
++                continue;
++            }
++
++            FLOAT_TYPE Pf[rows_per_thread];
++            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                Pf[r] = FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r]));
++                Lf[r] += Pf[r];
++            }
++
++            [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
++                FLOAT_TYPEV4 Vf;
++                if (SHMEM_STAGING != 0) {
++                    Vf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
++                } else if (USE_DECODE_V) {
++                    uint coord = vcol * v_stride * BLOCK_SIZE_V + 4 * (d * D_split + d_tid);
++                    uint ib = coord / BLOCK_SIZE_V;
++                    uint iqs = (coord % BLOCK_SIZE_V);
++                    Vf = dequantize4(ib, iqs, v_offset, BINDING_IDX_V);
++                } else {
++                    Vf = FLOAT_TYPEV4(data_vv4[v_offset / 4 + vcol * v_stride / 4 + d * D_split + d_tid]);
++                }
++                [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
++                    Of[r][d] += FLOAT_TYPEV4(Pf[r] * Vf);
++                }
++            }
++        }
+diff --git a/src/ggml-vulkan/vulkan-shaders/gelu_f32_f16.comp b/src/ggml-vulkan/vulkan-shaders/gelu_f32_f16.comp
+new file mode 100644
+index 0000000..54be3d1
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/gelu_f32_f16.comp
+@@ -0,0 +1,31 @@
++#version 450
++
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++
++// gelu of a contiguous f32 tensor written as f16 (the input of an f16 matmul), four values per thread;
++// the arithmetic is op_gelu from unary.comp, so the result equals gelu followed by a cast
++
++layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++
++layout(binding = 0) readonly buffer A { vec4 data_a[]; };
++layout(binding = 1) writeonly buffer D { f16vec4 data_d[]; };
++
++layout(push_constant) uniform parameter {
++    uint n4;
++} p;
++
++float op_gelu(float x) {
++    const float GELU_COEF_A    = 0.044715f;
++    const float SQRT_2_OVER_PI = 0.79788456080286535587989211986876f;
++    const float val = SQRT_2_OVER_PI*x*(1.0f + GELU_COEF_A*x*x);
++    return 0.5f*x*(2.0f - 2.0f / (exp(2.0f * val) + 1.0f));
++}
++
++void main() {
++    const uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
++    if (i >= p.n4) {
++        return;
++    }
++    const vec4 v = data_a[i];
++    data_d[i] = f16vec4(op_gelu(v.x), op_gelu(v.y), op_gelu(v.z), op_gelu(v.w));
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/group_norm_mul_add.comp b/src/ggml-vulkan/vulkan-shaders/group_norm_mul_add.comp
+new file mode 100644
+index 0000000..8200a87
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/group_norm_mul_add.comp
+@@ -0,0 +1,67 @@
++#version 450
++
++#include "generic_head.glsl"
++#include "types.glsl"
++
++#extension GL_EXT_control_flow_attributes : enable
++#define BLOCK_SIZE 512
++
++// group_norm(x) * w[c] + b[c], optionally followed by silu.
++// KX = group size, KY = elements per channel, param1 = eps, param2 = channel count, param3 = apply silu
++
++layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
++
++layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
++layout (binding = 1) readonly buffer W {A_TYPE data_w[];};
++layout (binding = 2) readonly buffer B {A_TYPE data_b[];};
++layout (binding = 3) writeonly buffer D {D_TYPE data_d[];};
++
++shared float tmp[BLOCK_SIZE];
++
++float reduce_sum(const uint tid, const float v) {
++    tmp[tid] = v;
++    barrier();
++    [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
++        if (tid < s) {
++            tmp[tid] += tmp[tid + s];
++        }
++        barrier();
++    }
++    const float r = tmp[0];
++    barrier();
++    return r;
++}
++
++void main() {
++    const uint group_size = p.KX;
++    const uint channel_size = p.KY;
++    const float eps = p.param1;
++    const uint n_channels = uint(p.param2);
++    const bool do_silu = p.param3 != 0.0f;
++
++    const uint tid = gl_LocalInvocationID.x;
++    const uint start = gl_WorkGroupID.x * group_size + tid;
++    const uint end = (gl_WorkGroupID.x + 1) * group_size;
++
++    float sum = 0.0f;
++    [[unroll]] for (uint col = start; col < end; col += BLOCK_SIZE) {
++        sum += float(data_a[col]);
++    }
++    const float mean = reduce_sum(tid, sum) / group_size;
++
++    float sum_sq = 0.0f;
++    [[unroll]] for (uint col = start; col < end; col += BLOCK_SIZE) {
++        const float xi = float(data_a[col]) - mean;
++        sum_sq += xi * xi;
++    }
++    const float scale = inversesqrt(reduce_sum(tid, sum_sq) / group_size + eps);
++
++    [[unroll]] for (uint col = start; col < end; col += BLOCK_SIZE) {
++        const uint c = (col / channel_size) % n_channels;
++        float v = (float(data_a[col]) - mean) * scale * float(data_w[c]) + float(data_b[c]);
++        if (do_silu) {
++            v = v / (1.0f + exp(-v));
++        }
++        data_d[col] = D_TYPE(v);
++    }
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/im2col.comp b/src/ggml-vulkan/vulkan-shaders/im2col.comp
+index ea77a3d..f032e21 100644
+--- a/src/ggml-vulkan/vulkan-shaders/im2col.comp
++++ b/src/ggml-vulkan/vulkan-shaders/im2col.comp
+@@ -23,116 +23,101 @@ layout (push_constant) uniform parameter
+ 
+ layout(constant_id = 0) const uint BLOCK_SIZE = 32;
+ 
+-const uint NUM_ITER = 512 / BLOCK_SIZE;
++// A workgroup transposes a tile of TILE output rows (flattened batch/oh/ow) x TILE CHW columns through shared
++// memory: reads walk along ow, so neighbouring threads read neighbouring input pixels, and writes walk along CHW.
++#define TILE 64
++#define WG_SIZE 256
++#define ROW_STEP (WG_SIZE / TILE)
+ 
+-layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
++layout(local_size_x = WG_SIZE, local_size_y = 1, local_size_z = 1) in;
+ 
+ layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
+ layout (binding = 1) writeonly buffer D {D_TYPE data_d[];};
++#if D_SIZE == 2 && !BDA
++layout (binding = 1) writeonly buffer D2 {f16vec2 data_d2[];};
++#endif
+ 
+ #if BDA
+ layout (buffer_reference, buffer_reference_align = D_SIZE) buffer D_ptr {D_TYPE d;};
+ #endif
+ 
+-void im2col(const uint ow, const uint z_idx) {
+-    const uint oh = z_idx % p.OH;
+-    const uint batch_idx = z_idx / p.OH;
+-
+-    const uint gidx = gl_LocalInvocationID.x;
+-    const uint src_batch = batch_idx * p.batch_offset;
+-    const BDA_OFFSET_T dst_row = ((BDA_OFFSET_T(batch_idx) * p.OH + oh) * p.OW + ow) * p.CHW;
++shared A_TYPE tile[TILE * (TILE + 1)];
+ 
++void main() {
++    const uint tid = gl_LocalInvocationID.x;
+     const uint KHKW = p.KH * p.KW;
+-
+-    // Precompute base input coordinates
+-    const int base_iw = int(ow * p.s0) - p.p0;
+-    const int base_ih = int(oh * p.s1) - p.p1;
+-
+-    // Precompute step deltas
+-    const uint delta_ic  = BLOCK_SIZE / KHKW;
+-    const uint delta_rem = BLOCK_SIZE % KHKW;
+-
+-    const uint delta_ky  = delta_rem / p.KW;
+-    const uint delta_kx  = delta_rem % p.KW;
+-
+-    const uint delta_ic_offset = delta_ic * p.offset_delta;
+-
+-    // If using BDA mode, precompute the base pointer  and step size
+-#if BDA
+-    const BDA_STORAGE_T base_dst_addr = p.dst_addr + D_SIZE * dst_row;
+-    const uint bda_step = D_SIZE * BLOCK_SIZE;
+-#endif
+-
+-    uint wg_x = gl_WorkGroupID.x;
+-    do {
+-        const uint wg_offset = wg_x * 512;
+-
+-        uint chw_idx = wg_offset + gidx;
+-
+-        uint ic  = chw_idx / KHKW;
+-        uint rem = chw_idx % KHKW;
+-
+-        uint ky  = rem / p.KW;
+-        uint kx  = rem % p.KW;
+-
+-        uint ic_offset = src_batch + ic * p.offset_delta;
+-
+-        // Initialize running pointer/index for the destination buffer
+-#if BDA
+-        BDA_STORAGE_T current_dst_addr = base_dst_addr + D_SIZE * chw_idx;
+-#else
+-        uint current_dst_idx = dst_row + chw_idx;
+-#endif
+-
+-        [[unroll]] for (uint i = 0; i < NUM_ITER; ++i) {
+-            if (chw_idx >= p.CHW) {
+-                return;
++    const uint n_rows = p.OH_batch * p.OW;
++    const uint delta_ic = ROW_STEP / KHKW;
++    const uint delta_ky = (ROW_STEP % KHKW) / p.KW;
++    const uint delta_kx = (ROW_STEP % KHKW) % p.KW;
++
++    for (uint r0 = gl_WorkGroupID.y * TILE; r0 < n_rows; r0 += gl_NumWorkGroups.y * TILE) {
++        const uint r = r0 + tid % TILE;
++        const uint ow = r % p.OW;
++        const uint oh = (r / p.OW) % p.OH;
++        const uint batch_idx = r / (p.OW * p.OH);
++        const int base_iw = int(ow * p.s0) - p.p0;
++        const int base_ih = int(oh * p.s1) - p.p1;
++        const uint src_batch = batch_idx * p.batch_offset;
++
++        for (uint c0 = gl_WorkGroupID.x * TILE; c0 < p.CHW; c0 += gl_NumWorkGroups.x * TILE) {
++            uint chw = c0 + tid / TILE;
++            uint ic  = chw / KHKW;
++            uint rem = chw % KHKW;
++            uint ky  = rem / p.KW;
++            uint kx  = rem % p.KW;
++            [[unroll]] for (uint i = 0; i < TILE * TILE / WG_SIZE; ++i) {
++                A_TYPE val = A_TYPE(0);
++                const int iih = base_ih + int(ky * p.d1);
++                const int iiw = base_iw + int(kx * p.d0);
++                if (r < n_rows && chw < p.CHW && uint(iih) < p.IH && uint(iiw) < p.IW) {
++                    val = data_a[src_batch + ic * p.offset_delta + uint(iih) * p.IW + uint(iiw)];
++                }
++                tile[(tid / TILE + i * ROW_STEP) * (TILE + 1) + tid % TILE] = val;
++
++                chw += ROW_STEP;
++                kx  += delta_kx;
++                ky  += delta_ky;
++                ic  += delta_ic;
++                const uint kx_wrap = uint(kx >= p.KW);
++                kx -= kx_wrap * p.KW;
++                ky += kx_wrap;
++                const uint ky_wrap = uint(ky >= p.KH);
++                ky -= ky_wrap * p.KH;
++                ic += ky_wrap;
+             }
+-
+-            const int iiw = base_iw + int(kx * p.d0);
+-            const int iih = base_ih + int(ky * p.d1);
+-
+-            A_TYPE val = A_TYPE(0);
+-            if (uint(iih) < p.IH && uint(iiw) < p.IW) {
+-                val = data_a[ic_offset + uint(iih) * p.IW + uint(iiw)];
++            barrier();
++
++#if D_SIZE == 2 && !BDA
++            // pairs of halves keep the stores 32-bit wide
++            if (p.CHW % 2 == 0) {
++                const uint cl = 2 * (tid % (TILE / 2));
++                const uint chw_w = c0 + cl;
++                [[unroll]] for (uint i = 0; i < TILE * TILE / (2 * WG_SIZE); ++i) {
++                    const uint rl = tid / (TILE / 2) + i * (2 * ROW_STEP);
++                    if (r0 + rl < n_rows && chw_w < p.CHW) {
++                        data_d2[((r0 + rl) * p.CHW + chw_w) / 2] =
++                            f16vec2(vec2(tile[cl * (TILE + 1) + rl], tile[(cl + 1) * (TILE + 1) + rl]));
++                    }
++                }
++                barrier();
++                continue;
+             }
+-
++#endif
++            const uint chw_w = c0 + tid % TILE;
++            [[unroll]] for (uint i = 0; i < TILE * TILE / WG_SIZE; ++i) {
++                const uint rl = tid / TILE + i * ROW_STEP;
++                if (r0 + rl < n_rows && chw_w < p.CHW) {
++                    const BDA_OFFSET_T dst_idx = BDA_OFFSET_T(r0 + rl) * p.CHW + chw_w;
++                    const float v = float(tile[(tid % TILE) * (TILE + 1) + rl]);
+ #if BDA
+-            D_ptr(current_dst_addr).d = D_TYPE(val);
+-            current_dst_addr += bda_step;
++                    D_ptr(p.dst_addr + D_SIZE * dst_idx).d = D_TYPE(v);
+ #else
+-            data_d[current_dst_idx] = D_TYPE(val);
+-            current_dst_idx += BLOCK_SIZE;
++                    data_d[dst_idx] = D_TYPE(v);
+ #endif
+-
+-            chw_idx   += BLOCK_SIZE;
+-            ic_offset += delta_ic_offset;
+-            kx        += delta_kx;
+-            ky        += delta_ky;
+-
+-            // Handle X axis wrap
+-            uint kx_wrap = uint(kx >= p.KW);
+-            kx          -= kx_wrap * p.KW;
+-            ky          += kx_wrap;
+-
+-            // Handle Y axis wrap
+-            uint ky_wrap = uint(ky >= p.KH);
+-            ky          -= ky_wrap * p.KH;
+-            ic_offset   += ky_wrap * p.offset_delta;
+-        }
+-
+-        wg_x += gl_NumWorkGroups.x;
+-    } while (wg_x * 512 < p.CHW);
+-}
+-
+-void main() {
+-    uint ow = gl_GlobalInvocationID.y;
+-    while (ow < p.OW) {
+-        uint z = gl_GlobalInvocationID.z;
+-        while (z < p.OH_batch) {
+-            im2col(ow, z);
+-            z += gl_NumWorkGroups.z;
++                }
++            }
++            barrier();
+         }
+-        ow += gl_NumWorkGroups.y;
+     }
+ }
+diff --git a/src/ggml-vulkan/vulkan-shaders/mul_mm.comp b/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
+index 19d3787..fe5aa1c 100644
+--- a/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
++++ b/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
+@@ -125,6 +125,9 @@ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
+ #ifdef MUL_MAT_ID
+ layout (binding = 3) readonly buffer IDS {int data_ids[];};
+ layout (binding = 4) readonly buffer RowMap {uint data_row_map[];};
++#else
++layout (binding = 3) readonly buffer Bias {float data_bias[];};
++layout (binding = 4) readonly buffer Resid {float data_resid[];};
+ #endif
+ 
+ layout (push_constant) uniform parameter
+@@ -155,6 +158,13 @@ layout (push_constant) uniform parameter
+     uint ne12;
+     uint broadcast2;
+     uint broadcast3;
++    uint padded_N;
++    // bias[((flat output index + bias_base) / bias_div) % bias_len] is added to the output, bias_len == 0 disables it
++    uint bias_base;
++    uint bias_div;
++    uint bias_len;
++    // fused epilogue: out = (acc + bias) or (acc * gate), plus resid; see MM_EPI_* in ggml-vulkan.cpp
++    uint epi;
+ #endif
+ } p;
+ 
+@@ -207,6 +217,9 @@ shared ACC_TYPE coopmat_stage[TM * TN * NUM_WARPS];
+ #include "iq_shmem_init.glsl"
+ #endif
+ 
++#define MM_EPI_GATE  1u
++#define MM_EPI_RESID 2u
++
+ void main() {
+ #ifdef MUL_MAT_ID
+     const uint tile_idx = gl_WorkGroupID.y + gl_WorkGroupID.z * gl_NumWorkGroups.y;
+@@ -519,11 +532,25 @@ void main() {
+                         data_d[row_idx.y * p.batch_stride_d + row_idx.x * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
+                     }
+ #else
++                    const uint d_idx = offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr;
++                    vec2 v = vec2(sums[sums_idx]);
++                    // with split_k only the first partial carries additive terms; the reduce sums the partials
++                    // (the gate is linear, so every partial is scaled)
++                    if (p.bias_len != 0) {
++                        const vec2 bv = vec2(data_bias[((d_idx + p.bias_base) / p.bias_div) % p.bias_len],
++                                             data_bias[((d_idx + p.bias_base + 1) / p.bias_div) % p.bias_len]);
++                        if ((p.epi & MM_EPI_GATE) != 0) {
++                            v *= bv;
++                        } else if (ik == 0) {
++                            v += bv;
++                        }
++                    }
++                    const bool resid = (p.epi & MM_EPI_RESID) != 0 && ik == 0;
+                     if (dr_warp + 2 * cr < p.M && dc_warp + cc < p.N) {
+-                        data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr] = D_TYPE(sums[sums_idx].x);
++                        data_d[d_idx] = D_TYPE(v.x + (resid ? data_resid[d_idx] : 0.0f));
+                     }
+                     if (dr_warp + 2 * cr + 1 < p.M && dc_warp + cc < p.N) {
+-                        data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
++                        data_d[d_idx + 1] = D_TYPE(v.y + (resid ? data_resid[d_idx + 1] : 0.0f));
+                     }
+ #endif // MUL_MAT_ID
+                 }
+diff --git a/src/ggml-vulkan/vulkan-shaders/norm_mul_add.comp b/src/ggml-vulkan/vulkan-shaders/norm_mul_add.comp
+new file mode 100644
+index 0000000..e618c5d
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/norm_mul_add.comp
+@@ -0,0 +1,74 @@
++#version 450
++
++#include "generic_head.glsl"
++#include "types.glsl"
++
++#extension GL_EXT_control_flow_attributes : enable
++#define BLOCK_SIZE 256
++
++// norm(x) * w + b over contiguous rows, w and b have one value per column.
++// KX = row length, KY = number of rows, param1 = eps
++
++layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
++
++layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
++layout (binding = 1) readonly buffer W {A_TYPE data_w[];};
++layout (binding = 2) readonly buffer B {A_TYPE data_b[];};
++layout (binding = 3) writeonly buffer D {D_TYPE data_d[];};
++
++shared vec2 sum[BLOCK_SIZE];
++
++void main() {
++    const uint row = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
++    if (row >= p.KY) {
++        return;
++    }
++    const uint ncols = p.KX;
++    const uint tid = gl_LocalInvocationID.x;
++    const uint base = row * ncols;
++
++    // rows up to CACHED * BLOCK_SIZE columns stay in registers between the statistics and the output pass
++    const uint CACHED = 2048 / BLOCK_SIZE;
++    float xr[CACHED];
++    const bool cached = ncols <= CACHED * BLOCK_SIZE;
++
++    vec2 s = vec2(0.0f);
++    if (cached) {
++        [[unroll]] for (uint k = 0; k < CACHED; k++) {
++            const uint i0 = tid + k * BLOCK_SIZE;
++            xr[k] = i0 < ncols ? float(data_a[base + i0]) : 0.0f;
++            s += vec2(xr[k], xr[k] * xr[k]);
++        }
++    } else {
++        for (uint i0 = tid; i0 < ncols; i0 += BLOCK_SIZE) {
++            const float xi = float(data_a[base + i0]);
++            s += vec2(xi, xi * xi);
++        }
++    }
++    sum[tid] = s;
++
++    barrier();
++    [[unroll]] for (int st = BLOCK_SIZE / 2; st > 0; st >>= 1) {
++        if (tid < st) {
++            sum[tid] += sum[tid + st];
++        }
++        barrier();
++    }
++
++    const float mean = sum[0].x / ncols;
++    const float var = sum[0].y / ncols - mean * mean;
++    const float inv_std = inversesqrt(var + p.param1);
++
++    if (cached) {
++        [[unroll]] for (uint k = 0; k < CACHED; k++) {
++            const uint i0 = tid + k * BLOCK_SIZE;
++            if (i0 < ncols) {
++                data_d[base + i0] = D_TYPE((xr[k] - mean) * inv_std * float(data_w[i0]) + float(data_b[i0]));
++            }
++        }
++    } else {
++        for (uint i0 = tid; i0 < ncols; i0 += BLOCK_SIZE) {
++            data_d[base + i0] = D_TYPE((float(data_a[base + i0]) - mean) * inv_std * float(data_w[i0]) + float(data_b[i0]));
++        }
++    }
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/rms_norm.comp b/src/ggml-vulkan/vulkan-shaders/rms_norm.comp
+index 314c8e5..70f2000 100644
+--- a/src/ggml-vulkan/vulkan-shaders/rms_norm.comp
++++ b/src/ggml-vulkan/vulkan-shaders/rms_norm.comp
+@@ -39,7 +39,9 @@ layout (binding = 3) readonly buffer I {uvec2 data_i[];};
+ #endif
+ 
+ #extension GL_EXT_control_flow_attributes : enable
++#ifndef BLOCK_SIZE
+ #define BLOCK_SIZE 512
++#endif
+ 
+ layout (constant_id = 1) const bool do_multiply = false;
+ #if RMS_NORM_ADD_FUSION
+diff --git a/src/ggml-vulkan/vulkan-shaders/rms_norm_mul_rope_apply.comp b/src/ggml-vulkan/vulkan-shaders/rms_norm_mul_rope_apply.comp
+new file mode 100644
+index 0000000..99fdce6
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/rms_norm_mul_rope_apply.comp
+@@ -0,0 +1,85 @@
++#version 450
++
++#extension GL_EXT_control_flow_attributes : enable
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++
++// rms_norm -> mul(weight) -> rope_apply in one pass, one workgroup per (head, token) row.
++// The sum of squares and the per-element arithmetic follow rms_norm_small_f32 and rope_apply.comp,
++// so the result matches the unfused ops. The f16 variant also takes in a following cast (k for flash attention).
++
++#define BLOCK_SIZE 64
++
++layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
++
++layout(binding = 0) readonly buffer X { float data_x[]; };
++layout(binding = 1) readonly buffer W { float data_w[]; };
++layout(binding = 2) readonly buffer PE { float data_pe[]; };
++layout(binding = 3) writeonly buffer D { D_TYPE data_d[]; };
++
++layout(push_constant) uniform parameter {
++    uint half_dim;
++    uint heads;
++    uint tokens;
++    uint pairs;
++    uint x_stride[4];
++    uint pe_stride[4];
++    uint x_offset;
++    uint pe_offset;
++    uint dst_offset;
++    uint interleaved;
++    uint w_offset;
++    float eps;
++} pc;
++
++shared float sumsh[BLOCK_SIZE];
++
++void main() {
++    const uint head  = gl_WorkGroupID.x;
++    const uint token = gl_WorkGroupID.y;
++    const uint batch = gl_WorkGroupID.z;
++    const uint tid   = gl_LocalInvocationID.x;
++    const uint ncols = 2*pc.half_dim;
++
++    const uint x_row = pc.x_offset + head*pc.x_stride[1] + token*pc.x_stride[2] + batch*pc.x_stride[3];
++
++    float sum = 0.0f;
++    for (uint col = tid; col < ncols; col += BLOCK_SIZE) {
++        const float xi = data_x[x_row + col*pc.x_stride[0]];
++        sum += xi * xi;
++    }
++    sumsh[tid] = sum;
++    barrier();
++    [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
++        if (tid < s) {
++            sum += sumsh[tid + s];
++            sumsh[tid] = sum;
++        }
++        barrier();
++    }
++    sum = sumsh[0];
++
++    const float mean  = sum / float(ncols);
++    const float scale = inversesqrt(mean + pc.eps);
++
++    const uint out_row = pc.dst_offset + ((batch*pc.heads + head)*pc.tokens + token)*ncols;
++    for (uint j = tid; j < pc.half_dim; j += BLOCK_SIZE) {
++        const uint i0 = pc.interleaved != 0 ? 2*j : j;
++        const uint i1 = pc.interleaved != 0 ? 2*j + 1 : j + pc.half_dim;
++        const float a = scale * data_x[x_row + i0*pc.x_stride[0]] * data_w[pc.w_offset + i0];
++        const float b = scale * data_x[x_row + i1*pc.x_stride[0]] * data_w[pc.w_offset + i1];
++        const uint matrix = pc.pe_offset + j*pc.pe_stride[2] + token*pc.pe_stride[3];
++        const float c = data_pe[matrix];
++        const float s = data_pe[matrix + pc.pe_stride[1]];
++        precise float y0;
++        precise float y1;
++        if (pc.interleaved != 0) {
++            y0 = a*c + b*data_pe[matrix + pc.pe_stride[0]];
++            y1 = a*s + b*data_pe[matrix + pc.pe_stride[0] + pc.pe_stride[1]];
++        } else {
++            y0 = a*c - b*s;
++            y1 = a*s + b*c;
++        }
++        data_d[out_row + i0] = D_TYPE(y0);
++        data_d[out_row + i1] = D_TYPE(y1);
++    }
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 0d2f551..7c42bca 100644
+--- a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -852,8 +852,13 @@ void process_shaders() {
+ 
+     // Norms
+     string_to_spv("norm_f32", "norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
++    string_to_spv("norm_mul_add_f32", "norm_mul_add.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
++    string_to_spv("norm_mul_add_f16", "norm_mul_add.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float16_t"}}));
+     string_to_spv("group_norm_f32", "group_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
++    string_to_spv("group_norm_mul_add_f32", "group_norm_mul_add.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+     string_to_spv("rms_norm_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
++    // one 64-thread wave per row for short rows such as per-head q/k norms
++    string_to_spv("rms_norm_small_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"BLOCK_SIZE", "64"}}));
+     string_to_spv("rms_norm_mul_add_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_ADD_FUSION", "1"}}));
+     string_to_spv("rms_norm_mul_add_partials_f32", "rms_norm_partials.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_ADD_FUSION", "1"}}));
+     string_to_spv("rms_norm_set_rows_f32_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_SET_ROWS_FUSION", "1"}}));
+@@ -993,6 +998,7 @@ void process_shaders() {
+     string_to_spv("log_f32",        "log.comp",         {{"A_TYPE", "float"},       {"D_TYPE", "float"}});
+     string_to_spv("gelu_f16",       "unary.comp",       {{"A_TYPE", "float16_t"},   {"D_TYPE", "float16_t"}, {"OP", "op_gelu"}});
+     string_to_spv("gelu_f32",       "unary.comp",       {{"A_TYPE", "float"},       {"D_TYPE", "float"},     {"OP", "op_gelu"}});
++    string_to_spv("gelu_f32_f16",   "gelu_f32_f16.comp", {});
+     string_to_spv("gelu_erf_f16",   "unary.comp",       {{"A_TYPE", "float16_t"},   {"D_TYPE", "float16_t"}, {"OP", "op_gelu_erf"}});
+     string_to_spv("gelu_erf_f32",   "unary.comp",       {{"A_TYPE", "float"},       {"D_TYPE", "float"},     {"OP", "op_gelu_erf"}});
+     string_to_spv("gelu_quick_f16", "unary.comp",       {{"A_TYPE", "float16_t"},   {"D_TYPE", "float16_t"}, {"OP", "op_gelu_quick"}});
+@@ -1097,6 +1103,8 @@ void process_shaders() {
+     string_to_spv("soft_max_large3_f32_f16", "soft_max_large3.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+ 
+     string_to_spv("rope_apply_f32", "rope_apply.comp", {});
++    string_to_spv("rms_norm_mul_rope_apply_f32", "rms_norm_mul_rope_apply.comp", {{"D_TYPE", "float"}});
++    string_to_spv("rms_norm_mul_rope_apply_f16", "rms_norm_mul_rope_apply.comp", {{"D_TYPE", "float16_t"}});
+ 
+     string_to_spv("rope_norm_f32", "rope_norm.comp", {{"A_TYPE", "float"}, {"ROPE_D_TYPE", "float"}});
+     string_to_spv("rope_norm_f16", "rope_norm.comp", {{"A_TYPE", "float16_t"}, {"ROPE_D_TYPE", "float16_t"}});
+diff --git a/src/ggml.c b/src/ggml.c
+index da9ccad..bd38cff 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -4905,6 +4905,11 @@ struct ggml_tensor * ggml_conv_2d(
+                 ggml_reshape_2d(ctx, im2col, im2col->ne[0],  im2col->ne[3] * im2col->ne[2] * im2col->ne[1]), // [N, OH, OW, IC * KH * KW] => [N*OH*OW, IC * KH * KW]
+                 ggml_reshape_2d(ctx, a, (a->ne[0] * a->ne[1] * a->ne[2]),  a->ne[3]));                       // [OC，IC, KH, KW] => [OC, IC * KH * KW]
+ 
++    if (im2col->ne[3] == 1) {
++        // with N == 1 the permute below only moves a size-1 dim, so the matmul output already has the final layout
++        return ggml_reshape_4d(ctx, result, im2col->ne[1], im2col->ne[2], a->ne[3], 1); // [N, OC, OH, OW]
++    }
++
+     result = ggml_reshape_4d(ctx, result, im2col->ne[1], im2col->ne[2], im2col->ne[3], a->ne[3]); // [OC, N, OH, OW]
+     result = ggml_cont(ctx, ggml_permute(ctx, result, 0, 1, 3, 2)); // [N, OC, OH, OW]
+ 
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 5e2db80..c67996e 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -8032,6 +8032,160 @@ struct test_group_norm_mul_add : public test_case {
+     }
+ };
+ 
++// LayerNorm with per-column gamma/beta, as in SD transformer blocks
++struct test_norm_affine : public test_case {
++    const std::array<int64_t, 4> ne;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "NORM_AFFINE";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    std::string vars() override {
++        return VARS_TO_STR1(ne);
++    }
++
++    test_norm_affine(std::array<int64_t, 4> ne = {320, 4096, 1, 1}) : ne(ne) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * a = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne.data());
++        ggml_tensor * w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ne[0]);
++        ggml_tensor * b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ne[0]);
++        ggml_set_name(a, "a"); ggml_set_name(w, "w"); ggml_set_name(b, "b");
++        ggml_tensor * out = ggml_norm(ctx, a, 1e-5f);
++        out = ggml_mul_inplace(ctx, out, w);
++        out = ggml_add_inplace(ctx, out, b);
++        ggml_set_name(out, "out");
++        return out;
++    }
++};
++
++// MUL_MAT followed by an in-place bias add, as built by sd.cpp for linear layers and im2col conv
++struct test_mul_mat_bias : public test_case {
++    const ggml_type type_a;
++    const ggml_type type_b;
++    const int64_t m, n, k;
++    const int64_t w; // > 0: view the output as [w, m/w, n, 1] and add a per-n bias, like conv2d
++    const int64_t batch;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "MUL_MAT_BIAS";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    double max_nmse_err() override { return 5e-4; }
++
++    std::string vars() override {
++        return VARS_TO_STR7(type_a, type_b, m, n, k, w, batch);
++    }
++
++    test_mul_mat_bias(ggml_type type_a = GGML_TYPE_F16, ggml_type type_b = GGML_TYPE_F32,
++                      int64_t m = 320, int64_t n = 4096, int64_t k = 320, int64_t w = 0, int64_t batch = 1)
++        : type_a(type_a), type_b(type_b), m(m), n(n), k(k), w(w), batch(batch) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * a = ggml_new_tensor_3d(ctx, type_a, k, m, batch);
++        ggml_tensor * b = ggml_new_tensor_3d(ctx, type_b, k, n, batch);
++        ggml_set_name(a, "a"); ggml_set_name(b, "b");
++        ggml_tensor * out = ggml_mul_mat(ctx, a, b);
++        ggml_tensor * bias;
++        if (w > 0) {
++            bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
++            ggml_set_name(bias, "bias");
++            out  = ggml_reshape_4d(ctx, out, w, m / w, n, 1);
++            bias = ggml_reshape_4d(ctx, bias, 1, 1, n, 1);
++        } else {
++            bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, m);
++            ggml_set_name(bias, "bias");
++        }
++        out = ggml_add_inplace(ctx, out, bias);
++        ggml_set_name(out, "out");
++        return out;
++    }
++};
++
++// DiT gated residual as built by sd.cpp: residual + mul_mat * per-channel gate (gelu: an unfused control case)
++struct test_mul_mat_epi : public test_case {
++    const ggml_type type_a;
++    const ggml_type type_b;
++    const int64_t m, n, k;
++    const bool gelu;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "MUL_MAT_EPI";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    double max_nmse_err() override { return 5e-4; }
++
++    std::string vars() override {
++        return VARS_TO_STR6(type_a, type_b, m, n, k, gelu);
++    }
++
++    test_mul_mat_epi(ggml_type type_a = GGML_TYPE_F16, ggml_type type_b = GGML_TYPE_F32,
++                     int64_t m = 256, int64_t n = 96, int64_t k = 128, bool gelu = false)
++        : type_a(type_a), type_b(type_b), m(m), n(n), k(k), gelu(gelu) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * a = ggml_new_tensor_2d(ctx, type_a, k, m);
++        ggml_tensor * b = ggml_new_tensor_3d(ctx, type_b, k, n, 1);
++        ggml_set_name(a, "a"); ggml_set_name(b, "b");
++        ggml_tensor * out = ggml_mul_mat(ctx, a, b);
++        if (gelu) {
++            out = ggml_gelu_inplace(ctx, out);
++        } else {
++            ggml_tensor * gate  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, m, 1, 1);
++            ggml_tensor * resid = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, m, n, 1);
++            ggml_set_name(gate, "gate"); ggml_set_name(resid, "resid");
++            out = ggml_add(ctx, resid, ggml_mul(ctx, out, gate));
++        }
++        ggml_set_name(out, "out");
++        return out;
++    }
++};
++
++// GROUP_NORM with per-channel gamma/beta and optional SiLU, as in SD UNet ResBlocks
++struct test_group_norm_affine : public test_case {
++    const std::array<int64_t, 4> ne;
++    int num_groups;
++    bool silu;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "GROUP_NORM_AFFINE";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    std::string vars() override {
++        return VARS_TO_STR3(ne, num_groups, silu);
++    }
++
++    test_group_norm_affine(std::array<int64_t, 4> ne = {64, 64, 320, 1}, int num_groups = 32, bool silu = false)
++        : ne(ne), num_groups(num_groups), silu(silu) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * a = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne.data());
++        ggml_tensor * w = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, 1, ne[2], 1);
++        ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, 1, ne[2], 1);
++        ggml_set_name(a, "a"); ggml_set_name(w, "w"); ggml_set_name(b, "b");
++        ggml_tensor * out = ggml_group_norm(ctx, a, num_groups, 1e-6f);
++        out = ggml_mul_inplace(ctx, out, w);
++        out = ggml_add_inplace(ctx, out, b);
++        if (silu) {
++            out = ggml_silu_inplace(ctx, out);
++        }
++        ggml_set_name(out, "out");
++        return out;
++    }
++};
++
+ // GGML_OP_L2_NORM x N: independent same-shape norms in one graph (strided qkv views or
+ // contiguous), consuming adds nested so the norms stay adjacent in the graph.
+ struct test_l2_norm_batch : public test_case {
+@@ -11526,6 +11680,29 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_group_norm(GGML_TYPE_F32, {9, 9, 1280, 1}));
+     test_cases.emplace_back(new test_group_norm_mul_add(GGML_TYPE_F32, {64, 64, 320, 1}));
+     test_cases.emplace_back(new test_group_norm_mul_add(GGML_TYPE_F32, {9, 9, 1280, 1}));
++    for (int64_t n : {320, 1280, 1025}) {
++        test_cases.emplace_back(new test_norm_affine({n, 77, 2, 1}));
++    }
++    for (ggml_type ta : {GGML_TYPE_F16, GGML_TYPE_F32}) {
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F32, 320, 4096, 320));
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F32, 768, 77, 768));
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F32, 1000, 33, 129, 0, 3));
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F32, 128, 128, 8192));
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F16, 4096, 320, 2880, 64));
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F16, 63 * 5, 130, 1152, 63));
++        test_cases.emplace_back(new test_mul_mat_bias(ta, GGML_TYPE_F16, 64, 64, 9216, 8));
++        for (bool gelu : {false, true}) {
++            test_cases.emplace_back(new test_mul_mat_epi(ta, GGML_TYPE_F32, 256, 96, 128, gelu));
++            test_cases.emplace_back(new test_mul_mat_epi(ta, GGML_TYPE_F32, 2048, 300, 2048, gelu));  // DiT-like, partial tiles
++            test_cases.emplace_back(new test_mul_mat_epi(ta, GGML_TYPE_F32, 1000, 33, 129, gelu));
++            test_cases.emplace_back(new test_mul_mat_epi(ta, GGML_TYPE_F32, 128, 128, 8192, gelu));   // split_k candidate
++        }
++    }
++    for (bool silu : {false, true}) {
++        test_cases.emplace_back(new test_group_norm_affine({64, 64, 320, 1}, 32, silu));
++        test_cases.emplace_back(new test_group_norm_affine({9, 9, 1280, 2}, 32, silu));
++        test_cases.emplace_back(new test_group_norm_affine({7, 5, 64, 3}, 8, silu));
++    }
+     test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 1, 1}, {256, 16, 1, 1}, -1));
+     test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 2, 3}, {256, 16, 2, 3}, -1));
+     test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 2, 3}, {128, 16, 2, 3}, -1));
+@@ -12045,6 +12222,67 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    // SD1.5 UNet shapes at 512x512 (latent 64x64), selected with SD_UNET_PERF=1
++    if (getenv("SD_UNET_PERF")) {
++        // conv as im2col + mul_mat: m = OH*OW, n = Cout, k = Cin*9 (both f16)
++        for (auto [m, n, k] : std::vector<std::array<int64_t, 3>>{
++                 {4096, 320, 2880}, {1024, 640, 5760}, {256, 1280, 11520}, {64, 1280, 11520},
++                 {4096, 320, 5760}, {1024, 640, 11520}, {256, 1280, 23040}}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F16, m, n, k, {1, 1}, {1, 1}));
++        }
++        // linear layers: f16 weights x f32 activations
++        for (auto [m, n, k] : std::vector<std::array<int64_t, 3>>{
++                 {320, 4096, 320}, {640, 1024, 640}, {1280, 256, 1280}, {2560, 4096, 320},
++                 {320, 4096, 1280}, {5120, 1024, 640}, {10240, 256, 1280}}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, m, n, k, {1, 1}, {1, 1}));
++        }
++        // Anima linear layers (hidden 2048, MLP 8192) at 1536 tokens (512x768) and 5520 tokens (920x1536)
++        for (int64_t t : {1536, 5520}) {
++            for (auto [m, k] : std::vector<std::array<int64_t, 2>>{{2048, 2048}, {8192, 2048}, {2048, 8192}}) {
++                test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, m, t, k, {1, 1}, {1, 1}));
++            }
++            // f16 input, as Anima casts the inputs of its linear layers
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F16, 2048, t, 2048, {1, 1}, {1, 1}));
++        }
++        // Anima TAE (taew2_1) decoder convolutions on 128px tiles
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {256, 256, 64, 1}, {3, 3, 64, 64}));
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {128, 64, 128, 1}, {3, 3, 128, 64}));
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {128, 64, 64, 1}, {3, 3, 64, 64}));
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {32, 32, 128, 1}, {3, 3, 128, 128}));
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {16, 16, 256, 1}, {3, 3, 256, 256}));
++        // self- and cross-attention
++        test_cases.emplace_back(new test_flash_attn_ext(40, 40, 8, {1, 1}, 4096, 4096, false, false, 0.0f, 0.0f, GGML_PREC_DEFAULT));
++        test_cases.emplace_back(new test_flash_attn_ext(40, 40, 8, {1, 1}, 77,   4096, false, false, 0.0f, 0.0f, GGML_PREC_DEFAULT));
++        test_cases.emplace_back(new test_flash_attn_ext(80, 80, 8, {1, 1}, 1024, 1024, false, false, 0.0f, 0.0f, GGML_PREC_DEFAULT));
++        test_cases.emplace_back(new test_flash_attn_ext(160, 160, 8, {1, 1}, 256, 256, false, false, 0.0f, 0.0f, GGML_PREC_DEFAULT));
++        // Anima (Cosmos DiT): head 128, 16 heads; self-attention at 512x768 and 920x1536, cross-attention to text
++        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 16, {1, 1}, 1536, 1536, false, false, 0.0f, 0.0f, GGML_PREC_F32));
++        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 16, {1, 1}, 512, 1536, false, false, 0.0f, 0.0f, GGML_PREC_F32));
++        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 16, {1, 1}, 5520, 5520, false, false, 0.0f, 0.0f, GGML_PREC_F32));
++        // SDXL UNet at 832x1216: FFN down at latent /4 and /2, a full-resolution conv; and two shapes that run well, as a check
++        for (auto [m, n, k] : std::vector<std::array<int64_t, 3>>{
++                 {1280, 988, 5120}, {640, 3952, 2560}, {15808, 320, 8640}, {10240, 988, 1280}, {988, 1280, 11520}}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, m, n, k, {1, 1}, {1, 1}));
++        }
++        // SDXL UNet: head 64; self-attention at 832x1216 (latent /2 and /4) and cross-attention to 77 text tokens
++        test_cases.emplace_back(new test_flash_attn_ext(64, 64, 10, {1, 1}, 3952, 3952, false, false, 0.0f, 0.0f, GGML_PREC_F32));
++        test_cases.emplace_back(new test_flash_attn_ext(64, 64, 20, {1, 1}, 988, 988, false, false, 0.0f, 0.0f, GGML_PREC_F32));
++        test_cases.emplace_back(new test_flash_attn_ext(64, 64, 20, {1, 1}, 77, 988, false, false, 0.0f, 0.0f, GGML_PREC_F32));
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {64, 64, 320, 1}, {3, 3, 320, 1}));
++        test_cases.emplace_back(new test_im2col(GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F16, {16, 16, 1280, 1}, {3, 3, 1280, 1}));
++        test_cases.emplace_back(new test_conv_2d({64, 64, 320, 1}, {3, 3, 320, 320}, GGML_TYPE_F16, 1, 1, 1, 1));
++        test_cases.emplace_back(new test_conv_2d({16, 16, 1280, 1}, {3, 3, 1280, 1280}, GGML_TYPE_F16, 1, 1, 1, 1));
++        test_cases.emplace_back(new test_bin_bcast(ggml_add, GGML_TYPE_F32, {4096, 320, 1, 1}, {1, 1, 1, 1}));
++        test_cases.emplace_back(new test_cont(GGML_TYPE_F32, {4096, 320, 1, 1}, false, {1, 0, 2, 3}));
++        test_cases.emplace_back(new test_group_norm(GGML_TYPE_F32, {64, 64, 320, 1}, 32));
++        test_cases.emplace_back(new test_group_norm_affine({64, 64, 320, 1}, 32, true));
++        test_cases.emplace_back(new test_norm_affine({320, 4096, 1, 1}));
++        test_cases.emplace_back(new test_norm_affine({2048, 1536, 1, 1}));  // Anima adaLN
++        test_cases.emplace_back(new test_mul_mat_bias(GGML_TYPE_F16, GGML_TYPE_F16, 4096, 320, 2880, 64));
++        test_cases.emplace_back(new test_mul_mat_bias(GGML_TYPE_F16, GGML_TYPE_F32, 320, 4096, 320));
++        return test_cases;
++    }
++
+     // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
+     // note: same bytes either way, so a backend that indexes them differently shows it here
+     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16}) {

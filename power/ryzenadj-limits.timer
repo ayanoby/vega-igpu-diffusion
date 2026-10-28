@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-apply RyzenAdj limits (firmware resets them on boot, resume and power profile changes)
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
