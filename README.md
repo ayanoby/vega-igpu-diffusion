@@ -1,116 +1,116 @@
-# Stable Diffusion на встроенной Vega 7: Anima, SDXL и другие модели через stable-diffusion.cpp
+# Stable Diffusion on an integrated Vega 7: Anima, SDXL and other models with stable-diffusion.cpp
 
-**English summary.** Image generation on a laptop without a discrete GPU — AMD Ryzen 7 PRO 4750U with the integrated Radeon Vega 7 (gfx90c, GCN 5) — using [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) on Vulkan (Mesa RADV). The repo contains ggml-vulkan patches tuned for Vega/GCN (matmul tiles, flash-attention parameters for head sizes 40/64/128, fused norms/bias/RoPE, tiled im2col, …), a few stable-diffusion.cpp patches, build and download scripts, a small GTK/web UI, and a long log of measurements — including what did *not* help. Results on this iGPU: Anima 2B turbo 512×768 in ~23 s, SDXL with a 4-step DMD2 LoRA at 832×1216 in ~38 s. Documentation is in Russian.
+[Русский](README.ru.md) · **English**
 
-Локальная генерация картинок на ноутбуке без дискретной видеокарты через [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (sd.cpp) на Vulkan. В репозитории:
+Local image generation on a laptop without a discrete GPU, using [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (sd.cpp) on Vulkan. The repository contains:
 
-- **Патчи** `patches/ggml-vega.patch` (ускорение ggml-vulkan на Vega/GCN, с тестами) и `patches/sd-cpp.patch` (правки sd.cpp: Anima, Wan VAE, выход FFN в UNet).
-- **Скрипты** `scripts/build.sh` (сборка `sd-cli` и `sd-server`) и `scripts/download.sh` (официальные модели с проверкой SHA256).
-- **Anima** `anima/gen-anima.sh` (командная строка) и `anima/merge_lora.py` (перевод в f16 и вшивание LoRA).
-- **Интерфейс** `gui/`: окно на GTK 4 или веб-страница, очередь, живое превью, история, img2img, выбор сэмплера, планировщика и LoRA.
-- **Апскейл** `tools/upscale.sh` (realesr-animevideov3, ×2 за ~1,6 с) и «живое фото» из ролика Wan `wan/cinemagraph.py`.
-- **Питание** `power/`: таймер RyzenAdj для лимитов мощности.
-- Подробный **журнал замеров**: что ускорило, что нет и почему.
+- **Patches** `patches/ggml-vega.patch` (ggml-vulkan speedups for Vega/GCN, with tests) and `patches/sd-cpp.patch` (sd.cpp changes: Anima, Wan VAE, the UNet FFN output).
+- **Scripts** `scripts/build.sh` (builds `sd-cli` and `sd-server`) and `scripts/download.sh` (official models, checked by SHA256).
+- **Anima** `anima/gen-anima.sh` (command line) and `anima/merge_lora.py` (f16 conversion and LoRA baking).
+- **UI** `gui/`: a GTK 4 window or a web page with a queue, live preview, history, img2img, sampler/scheduler choice and LoRAs. The UI text is in Russian.
+- **Upscaling** `tools/upscale.sh` (realesr-animevideov3, ×2 in ~1.6 s) and a "living photo" (cinemagraph) from a Wan clip, `wan/cinemagraph.py`.
+- **Power** `power/`: a RyzenAdj timer for power limits.
+- A detailed **measurement log**: what helped, what did not, and why.
 
-## Железо
+## Hardware
 
 | | |
 |---|---|
-| Ноутбук | ThinkPad T14s Gen 1 |
+| Laptop | ThinkPad T14s Gen 1 |
 | CPU | Ryzen 7 PRO 4750U |
-| GPU | Radeon Vega 7 (Renoir, gfx90c): 7 CU, до 1600 МГц, без матричных ядер, без int8 dot и bf16 |
-| ОЗУ | 16 ГБ DDR4, распаяна (ОС видит 14,3 ГиБ); GPU — 0,5 ГБ выделенной (BIOS) + общая память GTT (по умолчанию ~7,2 ГиБ, поднимается до 11 ГиБ, см. «Общая память и зависания») |
-| ОС | Ubuntu 26.04, ядро 7.0, Mesa RADV 26.0 |
+| GPU | Radeon Vega 7 (Renoir, gfx90c): 7 CUs, up to 1600 MHz, no matrix cores, no int8 dot, no bf16 |
+| RAM | 16 GB DDR4, soldered (the OS sees 14.3 GiB); the GPU gets 0.5 GB dedicated (BIOS) + shared GTT memory (~7.2 GiB by default, can be raised to 11 GiB, see "Shared memory and hangs") |
+| OS | Ubuntu 26.04, kernel 7.0, Mesa RADV 26.0 |
 
-Теоретический пик GPU — 2,87 TFLOPS fp16. На практике умножение матриц выдаёт ~1,0–1,3 TFLOPS: шейдер занимает 128 регистров, это 2 волны на SIMD.
+The theoretical GPU peak is 2.87 TFLOPS fp16. In practice matrix multiplication reaches ~1.0–1.3 TFLOPS: the shader uses 128 registers, which means 2 waves per SIMD.
 
-## Результаты
+## Results
 
-Время одной картинки, модель уже в памяти (интерфейс или `sd-server`), лимиты мощности RyzenAdj 25 Вт. Без охлаждающей подставки за длинную серию ноутбук доходит до 90 °C, и шаги идут до ~17% медленнее. Из командной строки добавляется загрузка весов, ~5–10 с.
+Time per image with the model already in memory (UI or `sd-server`), RyzenAdj power limits at 25 W. Without a cooling pad the laptop reaches 90 °C during a long series and steps get up to ~17% slower. From the command line, add ~5–10 s for loading the weights.
 
-| Модель и режим | Разрешение | Время |
+| Model and mode | Resolution | Time |
 |---|---|---|
-| Anima 2B turbo, 4 шага, CFG 1, TAE | 384×576 | ~12 с |
-| Anima 2B turbo | 512×768 | **~23 с** (шаги ~20 с, декодер ~1,6 с) |
-| Anima 2B turbo | 920×1536 (родное) | ~2:05 |
-| Anima 2.9B + Turbo-ANIMA V4-29B, 4 шага, CFG 1, TAE | 512×768 | ~33 с |
-| SDXL (класс Illustrious) + DMD2, 4 шага, CFG 1, taesdxl | 832×1216 | **~38 с** (шаг 7,6 с) |
+| Anima 2B turbo, 4 steps, CFG 1, TAE | 384×576 | ~12 s |
+| Anima 2B turbo | 512×768 | **~23 s** (steps ~20 s, decoder ~1.6 s) |
+| Anima 2B turbo | 920×1536 (native) | ~2:05 |
+| Anima 2.9B + Turbo-ANIMA V4-29B, 4 steps, CFG 1, TAE | 512×768 | ~33 s |
+| SDXL (Illustrious class) + DMD2, 4 steps, CFG 1, taesdxl | 832×1216 | **~38 s** (7.6 s per step) |
 | SDXL + DMD2 | 1024×1536 | ~1:02 |
-| Qwen-Image 2.1 Turbo (Q5_K_S), 8 шагов | 512×768 | ~3,5 мин |
-| Kromoss (MOSS-Image 5B, Q6_K) + DMD2-LoRA, 4 шага | 512×768 | ~2 мин |
-| Wan 2.2 TI2V 5B Turbo (Q4_K_M), 4 шага, 33 кадра | 512×768 | ~4:15 |
-| Апскейл ×2 (realesr-animevideov3) | 512×768 → 1024×1536 | ~1,6 с |
+| Qwen-Image 2.1 Turbo (Q5_K_S), 8 steps | 512×768 | ~3.5 min |
+| Kromoss (MOSS-Image 5B, Q6_K) + DMD2 LoRA, 4 steps | 512×768 | ~2 min |
+| Wan 2.2 TI2V 5B Turbo (Q4_K_M), 4 steps, 33 frames | 512×768 | ~4:15 |
+| Upscale ×2 (realesr-animevideov3) | 512×768 → 1024×1536 | ~1.6 s |
 
-Раньше патч настраивался на SD1.5 (аниме-чекпоинт, 20 шагов, CFG 7): 512×768 — ~80–85 с. Для сравнения, единственный найденный публичный замер на похожем железе — настольный Ryzen 5 5600G (Vega 7, 65 Вт), SD 1.4 через ROCm: ~3 с на шаг на 512×512 ([блог](https://www.gabriel.urdhr.fr/2022/08/28/trying-to-run-stable-diffusion-on-amd-ryzen-5-5600g/)); здесь в пересчёте на ту же работу ~2,5 с.
+The patch was first tuned on SD1.5 (an anime checkpoint, 20 steps, CFG 7): 512×768 took ~80–85 s. For comparison, the only public measurement found on similar hardware is a desktop Ryzen 5 5600G (Vega 7, 65 W) running SD 1.4 via ROCm: ~3 s per step at 512×512 ([blog](https://www.gabriel.urdhr.fr/2022/08/28/trying-to-run-stable-diffusion-on-amd-ryzen-5-5600g/)); here the same amount of work takes ~2.5 s.
 
-## Быстрый старт
+## Quick start
 
-### 1. Зависимости
+### 1. Dependencies
 
 ```bash
 sudo apt install build-essential cmake git libvulkan-dev glslc curl unzip python3-numpy
 ```
 
-Для окна интерфейса нужны `python3-gi` с GTK 4 и libadwaita (на Ubuntu с GNOME стоят из коробки).
+The UI window needs `python3-gi` with GTK 4 and libadwaita (preinstalled on Ubuntu with GNOME).
 
-### 2. Сборка
+### 2. Build
 
 ```bash
 scripts/build.sh
 ```
 
-Скрипт клонирует stable-diffusion.cpp на коммите `4c870cc` (ggml `a5915eb`) в `build-src/`, накладывает оба патча и собирает статические `sd-cli` и `sd-server` с Vulkan. Результат — `tools/bin-opt-sd-cli` и `tools/bin-opt-sd-server`, ими пользуются скрипты и интерфейс. Заголовки SPIR-V ставятся в `build-src/prefix`, в систему ничего не устанавливается. Сборка шейдеров — несколько минут.
+The script clones stable-diffusion.cpp at commit `4c870cc` (ggml `a5915eb`) into `build-src/`, applies both patches and builds static `sd-cli` and `sd-server` with Vulkan. The result goes to `tools/bin-opt-sd-cli` and `tools/bin-opt-sd-server`, which the scripts and the UI use. SPIR-V headers are installed into `build-src/prefix`; nothing is installed system-wide. Building the shaders takes a few minutes.
 
-### 3. Модели
+### 3. Models
 
 ```bash
 scripts/download.sh            # anima + upscaler
-scripts/download.sh sdxl       # DMD2-LoRA и taesdxl для SDXL
+scripts/download.sh sdxl       # DMD2 LoRA and taesdxl for SDXL
 ```
 
-| Группа | Файлы | Откуда |
+| Group | Files | Source |
 |---|---|---|
-| `anima` | `anima-turbo-v1.1` (4,2 ГБ, bf16 → переводится в f16), `qwen_3_06b_base` (текстовый энкодер, 1,2 ГБ), `qwen_image_vae` (254 МБ), `taew2_1` (22 МБ) | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima), [madebyollin/taehv](https://github.com/madebyollin/taehv) |
-| `sdxl` | `dmd2_sdxl_4step_lora_fp16` (376 МБ), `taesdxl` (9,8 МБ). Сам чекпоинт SDXL (любой класса Illustrious/NoobAI) положите в `sdxl/models/sdxl.safetensors` | [tianweiy/DMD2](https://huggingface.co/tianweiy/DMD2), [madebyollin/taesdxl](https://huggingface.co/madebyollin/taesdxl) |
-| `upscaler` | realesrgan-ncnn-vulkan 20220424 (47 МБ) | [Real-ESRGAN v0.2.5.0](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0) |
+| `anima` | `anima-turbo-v1.1` (4.2 GB, bf16 → converted to f16), `qwen_3_06b_base` (text encoder, 1.2 GB), `qwen_image_vae` (254 MB), `taew2_1` (22 MB) | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima), [madebyollin/taehv](https://github.com/madebyollin/taehv) |
+| `sdxl` | `dmd2_sdxl_4step_lora_fp16` (376 MB), `taesdxl` (9.8 MB). Put the SDXL checkpoint itself (any Illustrious/NoobAI-class model) at `sdxl/models/sdxl.safetensors` | [tianweiy/DMD2](https://huggingface.co/tianweiy/DMD2), [madebyollin/taesdxl](https://huggingface.co/madebyollin/taesdxl) |
+| `upscaler` | realesrgan-ncnn-vulkan 20220424 (47 MB) | [Real-ESRGAN v0.2.5.0](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0) |
 
-Для Anima 2.9B: модель на 40 блоков (например, [Anima-2.9B](https://huggingface.co/Gazingstars123/Anima-2.9B) или её доработки) и турбо-LoRA [Turbo-ANIMA V4-29B](https://civitai.com/models/2619830) вшиваются в один файл: `anima/merge_lora.py anima-2.9b.safetensors Turbo-ANIMA-v4-29B.safetensors anima/models/anima-2.9b_turbo4_f16.safetensors`. У этой LoRA alpha = ранг/2, скрипт это учитывает.
+For Anima 2.9B: bake a 40-block model (for example [Anima-2.9B](https://huggingface.co/Gazingstars123/Anima-2.9B) or a finetune of it) and the turbo LoRA [Turbo-ANIMA V4-29B](https://civitai.com/models/2619830) into one file: `anima/merge_lora.py anima-2.9b.safetensors Turbo-ANIMA-v4-29B.safetensors anima/models/anima-2.9b_turbo4_f16.safetensors`. This LoRA has alpha = rank/2; the script takes that into account.
 
-### 4. Лимит общей памяти (рекомендуется)
+### 4. Shared memory limit (recommended)
 
-По умолчанию драйвер отдаёт GPU половину ОЗУ (~7,2 ГиБ). С 11 ГиБ помещаются SDXL с энкодерами на GPU, Anima 2.9B, видео Wan и декодирование без тайлов. В `GRUB_CMDLINE_LINUX_DEFAULT` в `/etc/default/grub` добавить `ttm.pages_limit=2883584 ttm.page_pool_size=2883584`, затем:
+By default the driver gives the GPU half of the RAM (~7.2 GiB). With 11 GiB, SDXL with the text encoders on the GPU, Anima 2.9B, Wan video and untiled decoding all fit. Add `ttm.pages_limit=2883584 ttm.page_pool_size=2883584` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then:
 
 ```bash
 sudo update-grub
 ```
 
-После перезагрузки `cat /sys/class/drm/card*/device/mem_info_gtt_total` должно показать 11811160064. Больше 11–11,5 ГиБ ставить не стоит: системе нужно оставить ~3 ГБ. Скрипты и интерфейс сами включают «тяжёлые» режимы только при лимите ≥ 10 ГиБ.
+After a reboot `cat /sys/class/drm/card*/device/mem_info_gtt_total` should print 11811160064. Do not go above 11–11.5 GiB: the system needs ~3 GB left. The scripts and the UI enable the heavy modes only when the limit is ≥ 10 GiB.
 
-### 5. Интерфейс
+### 5. UI
 
 ```bash
 gui/start.sh
 ```
 
-Окно `gui/app.py` на GTK 4 (~110 МБ памяти против ~1–1,4 ГБ у вкладки браузера) или веб-страница `gui/start.sh --browser` (http://127.0.0.1:7860). Сервер `gui/server.py` — только стандартная библиотека Python; он держит один `sd-server` с выбранной моделью в памяти. Что умеет:
+The `gui/app.py` window uses GTK 4 (~110 MB of RAM versus ~1–1.4 GB for a browser tab); `gui/start.sh --browser` opens the web page instead (http://127.0.0.1:7860). The `gui/server.py` server uses only the Python standard library; it keeps one `sd-server` with the selected model in memory. Features:
 
-- модели: Anima 2B turbo, Anima 2.9B turbo, SDXL + DMD2 (в списке только те, чьи файлы есть на диске);
-- разрешение с примерным временем, шаги, seed, количество; сэмплер и планировщик (рекомендованные отмечены ★); свои LoRA с весами (`anima/loras/`, `sdxl/models/loras/`, кнопка ⟳ перечитывает папку);
-- очередь, живое превью, история с настройками, избранное, удаление в корзину (`gio trash`), автоапскейл ×2;
-- img2img: исходник (файл, перетаскивание, Ctrl+V, картинка из истории) и сила изменения. Сила передаётся как уровень шума (`strength_as_noise_level`, `force_first_sigma`): штатно sd.cpp при 4 шагах даёт всего 3 уровня, а с 0,75 начинает с чистого шума.
+- models: Anima 2B turbo, Anima 2.9B turbo, SDXL + DMD2 (only models whose files exist are listed);
+- resolution with an estimated time, steps, seed, count; sampler and scheduler (recommended ones are marked ★); your own LoRAs with weights (`anima/loras/`, `sdxl/models/loras/`, the ⟳ button rereads the folder);
+- queue, live preview, history with settings, favourites, deleting to the trash (`gio trash`), automatic ×2 upscale;
+- img2img: a source image (file, drag and drop, Ctrl+V, an image from the history) and a denoising strength. The strength is passed as a noise level (`strength_as_noise_level`, `force_first_sigma`): by default sd.cpp gives only 3 levels at 4 steps, and at 0.75 it starts from pure noise.
 
-Окно рисуется на CPU (`GSK_RENDERER=cairo`): с обычной Vulkan-отрисовкой GTK открытое окно даже в простое замедляло шаги на ~7% (5,39 против 5,05 с, A/B по три прогона). По той же причине во время генерации лучше свернуть браузер и Electron-приложения: свёрнутые окна не рисуют.
+The window renders on the CPU (`GSK_RENDERER=cairo`): with GTK's default Vulkan renderer an open window slowed the steps by ~7% even while idle (5.39 vs 5.05 s, A/B with three runs each). For the same reason, minimise browsers and Electron apps while generating: minimised windows do not render.
 
-### 6. Командная строка
+### 6. Command line
 
 ```bash
 anima/gen-anima.sh "1girl, solo, red kimono, sitting by a river, smile" 4 -1 512x768
 tools/upscale.sh --x2 anima/out/1793000000.png
 ```
 
-Аргументы `gen-anima.sh`: `"промпт" [шаги=4] [seed] [ШxВ=512x768]`, `MODEL=` — другой файл из `anima/models/`, `VAE=full` — полный Qwen-Image VAE вместо TAE.
+`gen-anima.sh` arguments: `"prompt" [steps=4] [seed] [WxH=512x768]`; `MODEL=` picks another file in `anima/models/`, `VAE=full` uses the full Qwen-Image VAE instead of TAE.
 
-SDXL с DMD2 (что делает интерфейс):
+SDXL with DMD2 (what the UI does):
 
 ```bash
 tools/bin-opt-sd-cli -m sdxl/models/sdxl.safetensors --lora-model-dir sdxl/models/loras --taesd sdxl/models/taesdxl.safetensors \
@@ -118,170 +118,170 @@ tools/bin-opt-sd-cli -m sdxl/models/sdxl.safetensors --lora-model-dir sdxl/model
   --scheduler gits --steps 4 --clip-skip 2 -W 832 -H 1216 --diffusion-fa --eager-load -o out.png
 ```
 
-Текстовые энкодеры CLIP-L/G на GPU (по умолчанию в sd.cpp) — 0,5 с на промпт против 2,5 с на CPU, но +1,6 ГБ видеопамяти (пик 9,5 ГБ на 1024×1536); при стандартном лимите GTT добавьте `--backend clip=cpu --params-backend clip=cpu`. Полный VAE SDXL здесь декодирует 30–76 с, `taesdxl` — 2,4–4,8 с.
+CLIP-L/G text encoders on the GPU (sd.cpp's default) take 0.5 s per prompt instead of 2.5 s on the CPU, but use 1.6 GB more video memory (peak 9.5 GB at 1024×1536); with the default GTT limit add `--backend clip=cpu --params-backend clip=cpu`. The full SDXL VAE decodes in 30–76 s here, `taesdxl` in 2.4–4.8 s.
 
-## Anima: почему такие настройки
+## Anima: why these settings
 
-| Настройка | Зачем |
+| Setting | Why |
 |---|---|
-| Турбо-модель в f16 | у Vega нет bf16, поэтому веса один раз переводятся в f16 (`merge_lora.py … none …`). Для доработок Anima турбо-LoRA вшивается в веса заранее (`merge_lora.py`: W += alpha/rank·B·A), чтобы не применять её на каждом запуске |
-| 4 шага, euler, CFG 1 | так обучена турбо-LoRA; на 6 шагах разница минимальная, на 2–3 картинка разваливается. CFG 1 — нет негативного прохода |
-| `--backend clip=cpu` | текстовый энкодер Qwen3 0.6B считается на CPU: это ~1 с и экономит GPU-память для DiT |
-| `--diffusion-fa` | flash attention; для головы 128 в патче подобраны свои параметры (см. ниже) |
-| TAE `taew2_1` | облегчённый декодер: в ~3 раза быстрее полного VAE, на глаз почти то же. При стандартном лимите GTT — тайлы 128×128 (буфер 108 МБ; без тайлов ~2,6 ГБ на 512×768 вместе с весами **вешало ноутбук**). При лимите ≥ 10 ГиБ до 640×960 декодирует целиком — на 0,6–0,8 с быстрее |
-| Полный VAE (`VAE=full`): тайлы 512×384 | если нужна максимальная точность декодирования |
-| Разрешение 512×768 по умолчанию | родное 920×1536 даёт больше деталей, но ~3 мин на картинку; меньше 384×576 качество слишком низкое, такие размеры убраны из интерфейса (из командной строки доступны) |
+| Turbo model in f16 | Vega has no bf16, so the weights are converted to f16 once (`merge_lora.py … none …`). For Anima finetunes a turbo LoRA is baked into the weights in advance (`merge_lora.py`: W += alpha/rank·B·A) so it is not applied on every run |
+| 4 steps, euler, CFG 1 | this is how the turbo was trained; at 6 steps the difference is minimal, at 2–3 the image falls apart. CFG 1 means no negative pass |
+| `--backend clip=cpu` | the Qwen3 0.6B text encoder runs on the CPU: ~1 s, and it saves GPU memory for the DiT |
+| `--diffusion-fa` | flash attention; the patch has its own parameters for head size 128 (see below) |
+| TAE `taew2_1` | tiny decoder: ~3× faster than the full VAE, nearly identical by eye. With the default GTT limit it uses 128×128 tiles (108 MB buffer; untiled, ~2.6 GB at 512×768 together with the weights **froze the laptop**). With a limit ≥ 10 GiB it decodes up to 640×960 in one piece, 0.6–0.8 s faster |
+| Full VAE (`VAE=full`): 512×384 tiles | when maximum decoding accuracy is needed |
+| 512×768 by default | the native 920×1536 has more detail but takes ~3 min per image; below 384×576 quality is too low, so those sizes are not offered in the UI (still available from the command line) |
 
-**Что такое тайлы.** Декодер обрабатывает картинку кусками (тайлами) с перекрытием, а потом сшивает их. Пиковая память зависит от размера тайла, а не картинки. Перекрытие 0,25 прячет швы.
+**What tiles are.** The decoder processes the image in overlapping pieces (tiles) and stitches them. Peak memory depends on the tile size, not on the image size. An overlap of 0.25 hides the seams.
 
-## Что делает патч ggml-vulkan
+## What the ggml-vulkan patch does
 
-Патч к `ggml/` (`patches/ggml-vega.patch`: ggml-vulkan + одна правка в `ggml.c`), около 1200 строк вместе с тестами.
+A patch to `ggml/` (`patches/ggml-vega.patch`: ggml-vulkan plus one change in `ggml.c`), about 1200 lines including tests.
 
-1. **Тайлы умножения матриц под GCN.** Тайл 64×64 на одну волну и 4×4 значения на поток. Большой тайл 128×128 включается только когда он ровно покрывает матрицу. В среднем 740 → 1000 GFLOPS на формах UNet. Действует только на AMD GCN.
-2. **Flash attention для головы 40 (SD1.x).** Блок 16 строк на 4 группы без деления по D: самовнимание 54 → 43 мс, перекрёстное 6,3 → 2,9 мс. Попутно исправлен баг шейдера: при `row_split > 1` перестановки в подгруппе пересекали границы групп строк.
-3. **Слияние нормализаций.** `group_norm → ×γ → +β [→ SiLU]` и `layer_norm → ×γ → +β` выполняются одним проходом (`group_norm_mul_add.comp`, `norm_mul_add.comp`). Стандартная проверка ggml отбрасывала in-place цепочки sd.cpp, поэтому добавлен свой сопоставитель.
-4. **Слияние bias с умножением матриц.** `mul_mat → [reshape] → add(bias)` для линейных слоёв и свёрток: bias прибавляется в момент записи результата. Отдельных ADD за шаг 270 → 142.
-5. **Свёртка без лишнего копирования.** При батче 1 `ggml_conv_2d` больше не делает бесполезный CONT после умножения.
-6. **Тайловый im2col.** Перестановка 64×64 через общую память: чтение идёт вдоль строки картинки, запись вдоль CHW. На свёртках VAE в 2,6 раза быстрее (4,97 → 1,87 с на картинку). На UNet примерно без изменений (+0,3 с на картинку).
+1. **Matmul tiles for GCN.** A 64×64 tile on one wave with 4×4 values per thread. The large 128×128 tile is used only when it covers the matrix exactly. On average 740 → 1000 GFLOPS on UNet shapes. AMD GCN only.
+2. **Flash attention for head size 40 (SD1.x).** A 16-row block in 4 groups without splitting D: self-attention 54 → 43 ms, cross-attention 6.3 → 2.9 ms. Also fixes a shader bug: with `row_split > 1`, subgroup shuffles crossed row-group boundaries.
+3. **Fused normalisations.** `group_norm → ×γ → +β [→ SiLU]` and `layer_norm → ×γ → +β` run in one pass (`group_norm_mul_add.comp`, `norm_mul_add.comp`). The standard ggml check rejected sd.cpp's in-place chains, so a custom matcher was added.
+4. **Bias fused into matmul.** `mul_mat → [reshape] → add(bias)` for linear layers and convolutions: the bias is added when the result is written. Separate ADDs per step 270 → 142.
+5. **Convolution without a needless copy.** With batch 1, `ggml_conv_2d` no longer does a useless CONT after the matmul.
+6. **Tiled im2col.** A 64×64 transpose through shared memory: reads go along image rows, writes along CHW. 2.6× faster on VAE convolutions (4.97 → 1.87 s per image). Roughly unchanged on the UNet (+0.3 s per image).
 
-7. **Flash attention для головы 128 (Anima / Cosmos DiT).** Группа из одной волны (64 потока), блоки 16×16, `row_split=4`, `d_split=4`. Быстрее параметров по умолчанию на ~11% для самовнимания на 1,5 тыс. токенов, на ~22% для 5,5 тыс. токенов и на ~34% для внимания к 512 текстовым токенам. Найдено перебором; замеры — случаи Anima в `SD_UNET_PERF`.
-8. **Исправление GQA.** Объединение голов при GQA проверяло максимальную долю по параметрам для 512 строк; с малыми блоками это давало неверный результат. Теперь проверяется `block_rows` для реального числа строк.
-9. **Большой тайл при большом k (GCN).** Слой MLP вниз у Anima (k=8192) на среднем тайле 64×64 шёл всего 0,55 TFLOPS: с ростом k средний тайл с вдвое большим трафиком памяти теряет L2. Теперь при k ≥ 4096 выбирается тайл 128×128: 0,55 → 0,92 TFLOPS, сэмплирование 512×768 34,9 → 29,5 с (−15%), 920×1536 −12%, картинка бит-в-бит та же. Для этого селектор тайлов получает k (раньше передавался 0). Порядок обхода тайлов группами и split-K проверены — не помогают.
-10. **Слияния для DiT (Anima), −8,5% на 512×768, картинка та же в пределах округления:**
-    - adaLN `norm(x)·(1+scale)+shift` — одним проходом существующим слиянием NORM_AFFINE. Для этого `patches/sd-cpp.patch` пишет модуляцию как norm → mul → add и заранее добавляет scale/shift/gate в граф (иначе обход в глубину ставит MLP таймстепа между norm и mul).
-    - RMSNorm коротких строк (q/k-нормы по головам, 128 столбцов): отдельный вариант шейдера на 64 потока вместо 512 — 3,5 → 0,85 мс на вызов.
-    - Выход проекций `остаток + h·gate`: умножение на гейт и прибавление остатка в эпилоге `mul_mm` (binding 4, флаги `epi`). GELU в эпилоге пробовали: MLP-вверх замедлялся с 41 до 61 мс, поэтому GELU остаётся отдельным.
-    - Слитый NORM_AFFINE держит строку (до 2048 значений) в регистрах между статистикой и выводом и идёт по 256 потоков на строку: 1,53 → 0,78 мс на вызов.
-12. **Перекрёстное внимание только по настоящим токенам текста** (`patches/sd-cpp.patch`, `anima.hpp`): контекст дополняется нулями до 512 токенов, а проекции K/V без bias и RMS-норма ключей оставляют нулевые строки нулевыми — поэтому K/V считаются только для реальных токенов промпта и дополняются нулями после. Бит-в-бит (CPU и GPU), сэмплирование 512×768 23,0 → 22,9 с (−0,6%).
-11. **TAE (taew2_1) без лишних кадров** (`patches/sd-cpp.patch`, `tae.hpp`): видео-декодер дважды удваивает число кадров и потом оставляет последний; после блоков памяти последнего слоя всё покадровое, поэтому ненужные кадры отбрасываются до апсемпла — свёртки на полном разрешении считают 1 кадр вместо 4. Декодирование 512×768 2,81 → 2,47 с, 920×1536 9,55 → 8,24 с, картинка бит-в-бит. (Без тайлов на 512×768 — 1,66 с, но буфер 1,5 ГБ рядом с 4 ГБ весов слишком близко к стандартному пределу GTT; при поднятом до 11 ГиБ лимите интерфейс и `gen-anima.sh` декодируют без тайлов до 640×960, см. ниже.)
-13. **FA без проверки границ на полных блоках** (`flash_attn.comp`, `flash_attn_block.glsl`). Когда длина KV не кратна блоку (16 у Anima), весь шейдер шёл в варианте с проверкой границ, на ~60% медленнее: при 448×672, 576×864, 704×1056, 832×1248 число токенов `(W/16)·(H/16)` не кратно 16. Тело цикла по блокам KV вынесено в файл и включается дважды: полные блоки без проверок, только последний — с проверками. Внимание на 2904 токена 196 → 122 мс, на 4056 — 354 → 200 мс; через интерфейс 576×864 40,9 → 36,3 с, 704×1056 69,3 → 60,0 с, 832×1248 103,4 → 86,6 с. Картинка та же в пределах округления. Проверку только в последнем блоке через переменную во время выполнения пробовали — медленнее (210 мс): компилятору нужна константа. Блок 8 (делит все такие длины) — 135 мс, сам по себе на ~28% медленнее блока 16.
-14. **Слияние RMSNorm → ×w → RoPE (+ приведение к f16)** (`rms_norm_mul_rope_apply.comp`). q/k-нормы самовнимания и `ROPE_APPLY` из sd.cpp идут одним проходом: одна рабочая группа на строку (голова, токен), сумма квадратов и арифметика как у несслитых шейдеров — картинка бит-в-бит. Для k слитый шейдер сразу пишет f16 для FA. Раньше это слияние отменяла проверка перекрытия: выход RoPE переставлен (головы ↔ токены), а распределитель клал его на место входа. Теперь `anima.hpp` держит исходные q/k в `src[2]` у RoPE (и у приведения k к f16), и они живут до конца слитой операции. Попутно: `ggml_can_fuse` требует одинаковой формы по цепочке (у RoPE она другая) и отвергает MUL на месте (вид выхода RMS_NORM), поэтому проверка своя; проверка перекрытия пропускает самоссылку `ggml_cast` в `src[1]`. За шаг 512×768: 125 → 50 мс.
-15. **Входы умножений в f16, слитые в NORM_AFFINE и GELU** (`norm_mul_add.comp` с выходом f16, `gelu_f32_f16.comp`). Шейдер умножения и так округляет вход B до f16 (веса f16), поэтому `anima.hpp` приводит к f16 выходы трёх adaLN и GELU в MLP — результат бит-в-бит (и на CPU), а умножения с f16-входом быстрее на 5–12% (меньше трафика). Приведение сливается в нормализацию/GELU, отдельных копий нет; GELU с выходом f16 пишет по 4 значения на поток (через общий `unary.comp` по 2 байта на поток было медленнее f32). 8 шагов 512×768 с остыванием перед каждым прогоном: 46,0 → 44,5 с (три пары из трёх).
-16. **FA для головы 64 (SDXL)** (`get_fa_tuning_params_scalar`). Параметры flash attention подбирались только под головы 40 и 128; у UNet SDXL голова 64, и внимание шло на 370–460 GFLOPS (22% шага). Перебор ~30 комбинаций на формах SDXL 832×1216 (`SD_UNET_PERF=1`): `Br=16, Bc=32, WG=128, row_split=4, d_split=4`. Самовнимание на 3952 токена 104 → 62 мс, на 988 — 9,9 → 7,3 мс, перекрёстное к 77 токенам 1,74 → 0,98 мс; внимание за шаг 1,77 → 1,15 с. Полная генерация A/B (старый/новый бинарник поочерёдно): шаг 8,42 → 7,85 с, 4 шага 38,3 → 36,0 с. Картинка та же в пределах округления (другой порядок суммирования). Все 5332 теста FLASH_ATTN_EXT проходят.
-17. **Выход FFN без f32-накопления** (`patches/sd-cpp.patch`, `block.hpp`). sd.cpp на Vulkan включал для `ff.net.2` в UNet накопление в f32 — защиту от переполнения f16, но это отдельный шейдер, в 1,5 раза медленнее (SDXL: 736 против 1150 GFLOPS). Теперь на Vulkan вход масштабируется на 1/128 и умножение идёт в f16 (как в sd.cpp для CUDA с k-квантами, «precision_fix»). Шаг SDXL 832×1216 −2…2,3% (пять промптов, A/B в каждой паре, включая 896×1152 и 1024×1536, три разные 4-шаговые DMD2-LoRA); NaN нет, картинка та же в пределах округления (средняя разница 5–14 из 255).
+7. **Flash attention for head size 128 (Anima / Cosmos DiT).** A one-wave workgroup (64 threads), 16×16 blocks, `row_split=4`, `d_split=4`. Faster than the defaults by ~11% for self-attention over 1.5k tokens, ~22% for 5.5k tokens and ~34% for attention to 512 text tokens. Found by a sweep; the measurements are the Anima cases in `SD_UNET_PERF`.
+8. **GQA fix.** Merging heads under GQA checked the maximum ratio using parameters for 512 rows; with small blocks this gave wrong results. It now checks `block_rows` for the real row count.
+9. **Large tile for large k (GCN).** Anima's MLP-down layer (k=8192) ran at only 0.55 TFLOPS on the medium 64×64 tile: as k grows, the medium tile with twice the memory traffic thrashes the L2. With k ≥ 4096 the 128×128 tile is now chosen: 0.55 → 0.92 TFLOPS, sampling at 512×768 34.9 → 29.5 s (−15%), 920×1536 −12%, bit-identical image. For this the tile selector now receives k (it used to get 0). Swizzled tile order and split-K were tested and do not help.
+10. **Fusions for the DiT (Anima), −8.5% at 512×768, same image within rounding:**
+    - adaLN `norm(x)·(1+scale)+shift` in one pass via the existing NORM_AFFINE fusion. For this `patches/sd-cpp.patch` writes the modulation as norm → mul → add and adds scale/shift/gate to the graph in advance (otherwise depth-first traversal puts the timestep MLP between norm and mul).
+    - RMSNorm of short rows (per-head q/k norms, 128 columns): a separate 64-thread shader variant instead of 512 — 3.5 → 0.85 ms per call.
+    - Projection outputs `residual + h·gate`: the gate multiply and residual add happen in the `mul_mm` epilogue (binding 4, `epi` flags). GELU in the epilogue was tried: MLP-up slowed from 41 to 61 ms, so GELU stays separate.
+    - The fused NORM_AFFINE keeps the row (up to 2048 values) in registers between the statistics and the output and uses 256 threads per row: 1.53 → 0.78 ms per call.
+12. **Cross-attention over real text tokens only** (`patches/sd-cpp.patch`, `anima.hpp`): the context is zero-padded to 512 tokens, and the K/V projections have no bias while the key RMS norm keeps zero rows zero, so K/V are computed only for the real prompt tokens and zero-padded afterwards. Bit-identical (CPU and GPU), sampling at 512×768 23.0 → 22.9 s (−0.6%).
+11. **TAE (taew2_1) without needless frames** (`patches/sd-cpp.patch`, `tae.hpp`): the video decoder doubles the frame count twice and then keeps the last frame; after the memory blocks of the last layer everything is per-frame, so the unneeded frames are dropped before the upsample — full-resolution convolutions compute 1 frame instead of 4. Decoding 512×768 2.81 → 2.47 s, 920×1536 9.55 → 8.24 s, bit-identical. (Untiled at 512×768 it is 1.66 s, but a 1.5 GB buffer next to 4 GB of weights is too close to the default GTT limit; with the limit raised to 11 GiB the UI and `gen-anima.sh` decode untiled up to 640×960, see below.)
+13. **FA without bounds checks on full blocks** (`flash_attn.comp`, `flash_attn_block.glsl`). When the KV length is not a multiple of the block (16 for Anima), the whole shader ran in the bounds-checked variant, ~60% slower: at 448×672, 576×864, 704×1056 and 832×1248 the token count `(W/16)·(H/16)` is not a multiple of 16. The KV block loop body moved into a file included twice: full blocks without checks, only the last one with checks. Attention over 2904 tokens 196 → 122 ms, over 4056 tokens 354 → 200 ms; through the UI 576×864 40.9 → 36.3 s, 704×1056 69.3 → 60.0 s, 832×1248 103.4 → 86.6 s. Same image within rounding. Checking only in the last block via a runtime variable was slower (210 ms): the compiler needs a constant. A block of 8 (which divides all such lengths) takes 135 ms, ~28% slower than a block of 16 on its own.
+14. **Fused RMSNorm → ×w → RoPE (+ cast to f16)** (`rms_norm_mul_rope_apply.comp`). The self-attention q/k norms and sd.cpp's `ROPE_APPLY` run in one pass: one workgroup per row (head, token), the sum of squares and arithmetic as in the unfused shaders — bit-identical image. For k the fused shader writes f16 directly for FA. Previously the overlap check cancelled this fusion: the RoPE output is permuted (heads ↔ tokens), and the allocator placed it over the input. Now `anima.hpp` keeps the original q/k in `src[2]` of RoPE (and of the k cast to f16), so they stay alive until the fused op ends. Along the way: `ggml_can_fuse` requires the same shape along the chain (RoPE's differs) and rejects an in-place MUL (a view of the RMS_NORM output), so the check is custom; the overlap check skips the `ggml_cast` self-reference in `src[1]`. Per step at 512×768: 125 → 50 ms.
+15. **Matmul inputs in f16, fused into NORM_AFFINE and GELU** (`norm_mul_add.comp` with f16 output, `gelu_f32_f16.comp`). The matmul shader rounds input B to f16 anyway (f16 weights), so `anima.hpp` casts the outputs of the three adaLNs and of the MLP GELU to f16 — bit-identical result (also on the CPU), while matmuls with f16 input are 5–12% faster (less traffic). The casts are fused into the normalisation/GELU, with no separate copies; GELU with f16 output writes 4 values per thread (the generic `unary.comp` at 2 bytes per thread was slower than f32). 8 steps at 512×768 with cooldown before each run: 46.0 → 44.5 s (three pairs out of three).
+16. **FA for head size 64 (SDXL)** (`get_fa_tuning_params_scalar`). Flash-attention parameters had only been tuned for head sizes 40 and 128; the SDXL UNet uses 64, and attention ran at 370–460 GFLOPS (22% of a step). A sweep of ~30 combinations on SDXL 832×1216 shapes (`SD_UNET_PERF=1`): `Br=16, Bc=32, WG=128, row_split=4, d_split=4`. Self-attention over 3952 tokens 104 → 62 ms, over 988 tokens 9.9 → 7.3 ms, cross-attention to 77 tokens 1.74 → 0.98 ms; attention per step 1.77 → 1.15 s. Full generation A/B (old and new binaries alternating): step 8.42 → 7.85 s, 4 steps 38.3 → 36.0 s. Same image within rounding (different summation order). All 5332 FLASH_ATTN_EXT tests pass.
+17. **FFN output without f32 accumulation** (`patches/sd-cpp.patch`, `block.hpp`). On Vulkan sd.cpp enabled f32 accumulation for `ff.net.2` in the UNet — a guard against f16 overflow, but it is a separate shader, 1.5× slower (SDXL: 736 vs 1150 GFLOPS). Now on Vulkan the input is scaled by 1/128 and the matmul runs in f16 (as sd.cpp does for CUDA with k-quants, "precision_fix"). SDXL 832×1216 step −2…2.3% (five prompts, A/B in each pair, including 896×1152 and 1024×1536, three different 4-step DMD2 LoRAs); no NaNs, same image within rounding (mean difference 5–14 out of 255).
 
-Правки 1, 2, 7 и 9 включаются только на AMD GCN. Остальные работают на любом GPU с Vulkan.
+Changes 1, 2, 7 and 9 apply only to AMD GCN. The others work on any Vulkan GPU.
 
-### Патч sd.cpp (`patches/sd-cpp.patch`)
+### sd.cpp patch (`patches/sd-cpp.patch`)
 
-- **Перекрёстное внимание через sink** (`anima.hpp`, `ggml_extend.cpp`): текстовый контекст в модели дополняется нулями до 512 токенов. Нулевой ключ даёт оценку 0, то есть добавляет e⁰ = 1 в знаменатель softmax и ничего в числитель. Ровно это делает «sink» FA (`ggml_flash_attn_ext_add_sinks`) со значением ln(число нулевых токенов) на голову, поэтому внимание считается только по реальным токенам (~40–110 вместо 512). Без FA то же через `ggml_soft_max_add_sinks`. Картинка та же в пределах округления (CPU: максимум 2/255). Перекрёстное FA за шаг 512×768: 271 → 53 мс, вся картинка −1,3 с.
-- **Кеш K/V текста между шагами** (`anima.hpp`): адаптер и K/V перекрёстного внимания зависят только от промпта. Первый шаг кладёт K (после нормы) и V всех 28 блоков в кеш раннера в f16 (FA всё равно приводит их к f16), следующие шаги берут их оттуда и вообще не строят адаптер и проекции контекста. Ключ — хеш контекста, t5_ids и весов, так что при CFG у позитива и негатива свои записи; кеш сбрасывается в `end_runners()` на каждой генерации. Бит-в-бит (GPU, CPU, CFG 2); 8 шагов с остыванием: 44,1 → 43,8 с (~0,13 с на 4 шагах).
-- **Без лишних копий перед FA** (`ggml_extend.cpp`): при батче 1 q и k отдаются в FA переставленными видами (FA работает с шагами), а V переставляется сразу при приведении к f16 — одна копия вместо двух. −45 мс за шаг, бит-в-бит.
-- **LoRA в формате kohya для Anima** (`name_conversion.cpp`): в именах `lora_unet_llm_adapter_…` подчёркивание в `llm_adapter` превращалось в точку, и LoRA адаптера текста молча не применялась (у одной из стилевых LoRA применялись 840 из 948 тензоров). `llm_adapter` добавлен в защищённые токены.
-- Wan VAE (у Anima это Qwen-Image VAE) — видео-VAE с причинными 3D-свёртками. Для одного кадра без кэша паддинг по времени нулевой, и от ядра работает только последний временной срез. Патч в `CausalConv3d::forward` в этом случае делает обычную 2D-свёртку этим срезом вместо 3D. Результат тот же, декодирование быстрее и легче по памяти.
+- **Cross-attention through a sink** (`anima.hpp`, `ggml_extend.cpp`): the text context is zero-padded to 512 tokens. A zero key gives a score of 0, i.e. it adds e⁰ = 1 to the softmax denominator and nothing to the numerator. That is exactly what an FA "sink" (`ggml_flash_attn_ext_add_sinks`) with the value ln(number of zero tokens) per head does, so attention runs over the real tokens only (~40–110 instead of 512). Without FA the same is done via `ggml_soft_max_add_sinks`. Same image within rounding (CPU: at most 2/255). Cross-attention FA per step at 512×768: 271 → 53 ms, the whole image −1.3 s.
+- **Text K/V cache between steps** (`anima.hpp`): the adapter and the cross-attention K/V depend only on the prompt. The first step stores K (after the norm) and V of all 28 blocks in the runner cache in f16 (FA casts them to f16 anyway); later steps take them from there and do not build the adapter or the context projections at all. The key is a hash of the context, t5_ids and weights, so with CFG the positive and negative prompts get separate entries; the cache is cleared in `end_runners()` on every generation. Bit-identical (GPU, CPU, CFG 2); 8 steps with cooldown: 44.1 → 43.8 s (~0.13 s at 4 steps).
+- **No extra copies before FA** (`ggml_extend.cpp`): with batch 1, q and k go into FA as permuted views (FA works with strides), and V is permuted while being cast to f16 — one copy instead of two. −45 ms per step, bit-identical.
+- **kohya-format LoRAs for Anima** (`name_conversion.cpp`): in names like `lora_unet_llm_adapter_…` the underscore in `llm_adapter` became a dot, and the text-adapter part of the LoRA was silently not applied (for one style LoRA, 840 of 948 tensors were applied). `llm_adapter` was added to the protected tokens.
+- Wan VAE (Anima uses it as the Qwen-Image VAE) is a video VAE with causal 3D convolutions. For a single frame without a cache the temporal padding is zero, and only the last temporal slice of the kernel matters. In that case the patch makes `CausalConv3d::forward` run a regular 2D convolution with that slice instead of a 3D one. Same result, faster and lighter on memory.
 
-### Проверка
+### Verification
 
-В `tests/test-backend-ops.cpp` добавлены тесты `GROUP_NORM_AFFINE`, `NORM_AFFINE` и `MUL_MAT_BIAS` (в том числе свёрточный случай и split-K), а также набор замеров форм UNet под переменной `SD_UNET_PERF=1`. Все тесты проходят:
+`tests/test-backend-ops.cpp` gains `GROUP_NORM_AFFINE`, `NORM_AFFINE` and `MUL_MAT_BIAS` tests (including a convolution case and split-K), plus a set of UNet shape benchmarks behind `SD_UNET_PERF=1`. All tests pass:
 
-| Тест | Пройдено |
+| Test | Passed |
 |---|---|
 | MUL_MAT | 2279 / 2279 |
 | MUL_MAT_ID | 939 / 939 |
-| FLASH_ATTN_EXT | 5332 / 5332 (после правок 7–8) |
+| FLASH_ATTN_EXT | 5332 / 5332 (after changes 7–8) |
 | CONV_2D | 1966 / 1966 |
 | IM2COL | 102 / 102 |
 | MUL_MAT_BIAS | 11 / 11 |
-| NORM / GROUP_NORM / *_AFFINE / *_MUL_ADD | все |
-| ADD / MUL / SILU | все |
+| NORM / GROUP_NORM / *_AFFINE / *_MUL_ADD | all |
+| ADD / MUL / SILU | all |
 | `test-conv2d`, `test-conv1d` | PASSED |
 
-Запуск тестов в собранном дереве:
+Running the tests in the build tree:
 
 ```bash
 build-src/stable-diffusion.cpp/build/bin/test-backend-ops test -b Vulkan0 -o MUL_MAT_BIAS
 ```
 
-`test-backend-ops` собирается отдельно (`cmake --build build --target test-backend-ops`).
+`test-backend-ops` is built separately (`cmake --build build --target test-backend-ops`).
 
-## Другие модели и видео (замеры, в интерфейс не входят)
+## Other models and video (measured, not in the UI)
 
-Всё на этом ноутбуке, GTT 11 ГиБ, тот же патченый ggml. Скриптов запуска для этих моделей в репозитории нет (кроме `wan/cinemagraph.py`) — записаны команды-рецепты в виде флагов и результаты.
+All on this laptop, GTT 11 GiB, the same patched ggml. There are no launch scripts for these models in the repo (except `wan/cinemagraph.py`); the recipes are given as flags together with the results.
 
-| Модель | Файлы | Время | Вывод |
+| Model | Files | Time | Findings |
 |---|---|---|---|
-| **Qwen-Image 2.1 Turbo** (7B, 8 шагов, CFG 1, `--sigmas qwen-image-2.1-turbo`) | `qwen-image-2.1-turbo-Q5_K_S.gguf` (unsloth, 4,5 ГБ), `Qwen3VL-8B-Instruct-Q4_K_M.gguf` на CPU, `taeqi2_1` | 512×768 — 212 с (шаг 26 с, энкодер 1,9 с, декодер 0,24 с) | Надписи на картинке правильные. Профиль шага: умножение матриц 84% (Q4_K/Q5_K на 0,75–1,1 TFLOPS — столько же, сколько f16), внимание 6,8%. Слои Q5_K медленнее Q4_K (875 против 1078 GFLOPS) — чистый Q4_K_M дал бы ~3%. VAE ускорять некуда |
-| **Kromoss** (MOSS-Image 5B, lodestones) + `8-steps-dmd2-lora` (CFG 1) | `kromoss-Q6_K.gguf` (molbal), `Qwen3.5-9B-Q4_K_M.gguf` на CPU + `tokenizer.json`, `flux2-vae_small` | 512×768: 8 шагов — 3,6 мин, 4 шага — ~2 мин (качество почти то же) | sd.cpp сам раскладывает раздельные q/k/v LoRA по слитому `qkv` (756/756 тензоров). На квантованной модели LoRA применяется на лету: шаг 25 с против 21 с без неё (+17%); вшить её можно только в bf16/f32 с повторным квантованием. Полный VAE 10,5 с, лёгкого декодера для FLUX.2 VAE в sd.cpp нет. Иногда рисует надпись-водяной знак в углу |
-| **Wan 2.2 TI2V 5B Turbo** (4 шага, CFG 1) | `Wan2_2-TI2V-5B-Turbo-Q4_K_M.gguf` (hum-ma, 3,4 ГБ), `umt5-xxl-encoder-Q4_K_M.gguf` на CPU, `taew2_2` | 33 кадра (1,4 с видео): 480×832 и 512×768 — ~4:15 (шаг ~57 с, ~15 мс на латентный токен), 49 кадров — ~5 мин | На 352×640 и меньше — брак (квадраты 32 px, и в стоковой сборке тоже): модель обучена на ~704p. Image-to-video из картинки Anima держит стиль и лицо. 49 кадров без `--vae-tiling --temporal-tiling` съели всю память при декодировании и подвесили ноутбук. K-кванты шли почти как в стоковой сборке (123 против 129 с) |
-| Wan: петля и «живое фото» | `--end-img` = `-i` (одна картинка в начале и в конце) | как выше | Последний латентный кадр (4 видеокадра) декодируется бледным — его отбрасывают. «Живое фото» (`wan/cinemagraph.py`): кадры Wan только внутри маски персонажа, фон — исходник пиксель в пиксель; моргать по просьбе Wan не стал, поэтому моргание вклеивается из исходника с закрытыми глазами (инпейнт Anima по маске глаз, 7 кадров). Автомаска по движению срабатывает не всегда — на тихих петлях лучше нарисованная маска |
-| LTX-2.5 (22B) | — | не запускали | Самый маленький квант 7,3 ГБ (Q2_K), с энкодером Gemma 4 12B (~7 ГБ в Q4) в 14 ГБ ОЗУ не помещается; с подгрузкой весов с диска по оценке 10–30 мин на 2-секундный ролик |
+| **Qwen-Image 2.1 Turbo** (7B, 8 steps, CFG 1, `--sigmas qwen-image-2.1-turbo`) | `qwen-image-2.1-turbo-Q5_K_S.gguf` (unsloth, 4.5 GB), `Qwen3VL-8B-Instruct-Q4_K_M.gguf` on the CPU, `taeqi2_1` | 512×768 — 212 s (26 s per step, encoder 1.9 s, decoder 0.24 s) | Text in the image is rendered correctly. Step profile: matmul 84% (Q4_K/Q5_K at 0.75–1.1 TFLOPS — the same as f16), attention 6.8%. Q5_K layers are slower than Q4_K (875 vs 1078 GFLOPS) — a pure Q4_K_M would save ~3%. Nothing left to speed up in the VAE |
+| **Kromoss** (MOSS-Image 5B, lodestones) + `8-steps-dmd2-lora` (CFG 1) | `kromoss-Q6_K.gguf` (molbal), `Qwen3.5-9B-Q4_K_M.gguf` on the CPU + `tokenizer.json`, `flux2-vae_small` | 512×768: 8 steps — 3.6 min, 4 steps — ~2 min (almost the same quality) | sd.cpp maps the LoRA's separate q/k/v onto the fused `qkv` by itself (756/756 tensors). On a quantised model the LoRA is applied at runtime: 25 s per step vs 21 s without it (+17%); baking it in requires bf16/f32 and requantising. The full VAE takes 10.5 s; sd.cpp has no tiny decoder for the FLUX.2 VAE. It sometimes draws a watermark-like caption in a corner |
+| **Wan 2.2 TI2V 5B Turbo** (4 steps, CFG 1) | `Wan2_2-TI2V-5B-Turbo-Q4_K_M.gguf` (hum-ma, 3.4 GB), `umt5-xxl-encoder-Q4_K_M.gguf` on the CPU, `taew2_2` | 33 frames (1.4 s of video): 480×832 and 512×768 — ~4:15 (~57 s per step, ~15 ms per latent token), 49 frames — ~5 min | At 352×640 and below the output is broken (32 px blocks, also in the stock build): the model was trained at ~704p. Image-to-video from an Anima picture keeps the style and face. 49 frames without `--vae-tiling --temporal-tiling` used up all the memory while decoding and hung the laptop. K-quants ran almost as in the stock build (123 vs 129 s) |
+| Wan: loop and "living photo" | `--end-img` = `-i` (the same image at the start and the end) | as above | The last latent frame (4 video frames) decodes washed out, so it is dropped. The "living photo" (`wan/cinemagraph.py`): Wan frames are used only inside a mask of the character, the background is the source pixel for pixel; Wan did not blink on request, so a blink is blended in from the source with the eyes inpainted closed (Anima inpainting with an eye mask, 7 frames). The automatic motion mask does not always work — a hand-drawn mask is better for quiet loops |
+| LTX-2.5 (22B) | — | not run | The smallest quant is 7.3 GB (Q2_K); with the Gemma 4 12B encoder (~7 GB at Q4) it does not fit in 14 GB of RAM; with weights streamed from disk the estimate is 10–30 min for a 2-second clip |
 
-## Журнал экспериментов: что не помогло
+## Experiment log: what did not help
 
-Строки про CFG, планировщики, кэши шагов, эмбеддинги и негативы относятся к SD1.5 (аниме-чекпоинт, 20 шагов, CFG 7).
+Rows about CFG, schedulers, step caches, embeddings and negatives refer to SD1.5 (an anime checkpoint, 20 steps, CFG 7).
 
-| Идея | Результат |
+| Idea | Result |
 |---|---|
-| ucache в режиме качества | −42% времени, но ломает мелкие детали и анатомию, появляются лишние руки |
-| Кэш spectrum | −30% времени, грубые артефакты цвета |
-| Планировщик AYS, 14 шагов | −25% времени, качество почти то же, но мелкие текстуры хуже; оставлен Karras |
-| AYS, 10 шагов | заметно площе и беднее деталями |
-| CFG 1 на последних 10 шагах | бледнее и площе; оптимум — 6 шагов |
-| Hires fix (latent, ×1,5) | качество как на Civitai, но 325 с вместо 107; без hires разница небольшая |
-| Предвыборка тайла в шейдере умножения | медленнее на 9%: 128 → 176 регистров, 2 → 1 волна на SIMD |
-| ROCm (ночная сборка TheRock gfx900 + `HSA_OVERRIDE_GFX_VERSION=9.0.0`) | заработал только с рантаймом HSA из Ubuntu; в 3,5 раза медленнее Vulkan, повесил систему |
-| Квантование весов (q8/q4) | не поможет: умножение упирается в вычисления, а у Vega нет int8 dot (`int dot: 0`) |
-| Негативные эмбеддинги EasyNegative и bad-hands-5 | скорость та же, но устойчивого улучшения рук и анатомии нет: картинка меняется примерно как от другого seed (4 промпта, A/B) |
-| Профиль питания `performance` и DPM `high` | частоты GPU и памяти на максимуме (1600/1333 МГц), но генерация на ~10% медленнее, чем на `balanced` + `auto`; `performance` + `auto` — хуже всего |
-| `GGML_VK_ALLOW_GRAPHICS_QUEUE=1` | около 2%, может подтормаживать интерфейс |
-| Апскейлер: тайлы 64 / 256 / 384, прямые свёртки | 32,5 / 38,5 / 44,5 / 31,6 с против 29,6 с у тайла 128 по умолчанию |
-| ROCm для Anima | то же, что выше: Vulkan быстрее, ROCm удалён |
-| Декодирование Anima полным VAE прямыми свёртками | мусор на выходе; `--offload-to-cpu` падает |
-| TAE `taew2_1` без тайлов на GPU (512×768) | буфер 2,6 ГБ + веса — память кончилась, ноутбук завис. Только с тайлами |
-| TAE с тайлами 256 / 512 / 64 | 128 — лучший компромисс: 64 медленнее и заметнее швы, 256+ съедают память |
-| Cosmos LoRA вместо Anima Turbo | хуже на 4 шагах, удалена |
-| Turbo v0.2 → v1.1 (4 и 8 шагов, 4 промпта) | качество примерно равное: v1.1 чище и с более чёткими контурами, v0.2 насыщеннее и разнообразнее; выбрана v1.1. 8 шагов детальнее у обеих, но вдвое дольше |
-| Турбо-LoRA на 1–2 шагах | картинка разваливается |
-| MIGraphX / rocBLAS (ROCm 7.2, распакован без sudo, ядра gfx900 из 6.3.4, заглушка hipblaslt) | ROCm запустился; rocBLAS fp16 до 1,51 TFLOPS на крупных формах, но на 512×768 суммарно медленнее нашего Vulkan на ~37%; переход на MIGraphX не стоит портирования |
-| Обход тайлов группами (swizzle) в `mul_mm`, split-K для k=8192 | без выигрыша или медленнее |
-| Ускорение `mul_mm`: перебор тайлов, предвыборка в регистры, раскладка A парами строк, B в fp16 | 0–4%: шейдер упирается в задержки памяти (2 волны на SIMD), а не в вычисления; на 512×768 он и так ~2× быстрее rocBLAS |
-| IREE 3.13 (Vulkan, цели `cdna1`/`rdna1`; GCN-целей нет) | 0,03–0,40 TFLOPS против 1,0–1,43 у ggml |
-| TVM (MLC 0.26): dlight 0,14–0,31 TFLOPS; автоподбор MetaSchedule | 0,64 TFLOPS за 32 попытки, и случайные ядра дольше 2 с **сбрасывали GPU** (экран гас, сессия вылетела) — не запускать без поднятого таймаута |
-| ToDo: сжатие K/V 2×2 в самовнимании (выборка, усреднение, усреднение до RoPE с центром клетки и перенормировкой) | −7% на 512×768, −24% на 920×1536, но блоки/мыло/развал картинки в любом варианте: в DiT нет свёрток, локальные детали идут только через внимание |
-| ToMA (упрощённый: тайлы 4×4, опорные токены через один, soft-слияние τ=0,01) | во всех или последних блоках — пикселизация; только средние блоки 8–17: −15%, 4–19: −24…26%, но мягче, ниже контраст, теряются мелочи — отвергнуто |
-| AMDVLK 2023.Q3.3 (последний официальный Vulkan-драйвер AMD с Vega; компилятор LLPC/LLVM; подключался через `VK_ICD_FILENAMES` без установки) | умножение матриц 0,12–0,22 TFLOPS против 1,0–1,43 у RADV (в 6–8 раз медленнее), общая память 32 КБ вместо 64, тест flash attention уронил GPU (`DeviceLost`) |
-| Mesa 26.2.5 (RADV собран локально, с libdrm 2.4.133, через `VK_ICD_FILENAMES`) вместо системной 26.0.8 | тесты проходят; микрозамеры MLP-вверх/FA +3–6%, но полная генерация **медленнее на 2–4%** (512×768: 26,4 → 27,1 с; 920×1536: 133 → 139 с) |
-| Правка компилятора ACO (Mesa 26.0.8, локальная сборка): окна/лимиты перестановок планировщика для LDS, VMEM, клауз; потолок VGPR 84 ради 3 волн | значения по умолчанию лучшие; без планировщика −35%; при 84 VGPR средний тайл всё равно 2 волны (упор в LDS 8,7 КБ), большой получает 3 волны, но с вытеснением регистров медленнее (1,08 → 1,01 TFLOPS) |
-| Внимание без FA на 512×768 (обычные умножения + softmax) | 28,9 с против 24,2 с — медленнее |
-| Flash attention с накоплением в f16 (`GGML_PREC_DEFAULT`) | FA +14%, шаг ~−2%, картинки на глаз те же, но риск переполнения f16 на редких промптах — оставлено f32 |
-| TAE без тайлов при стандартном GTT 7 ГиБ | декодирование 2,42 → 1,66 с на 512×768, но вместе с 4 ГБ весов слишком близко к пределу (ноутбук зависал); включается само только при GTT ≥ 10 ГиБ |
-| TAE без тайлов на 768×1152 и больше / тайлы 256 и 384 px | 768×1152: 5,45 → 6,29 с (медленнее), пик 8,5 ГБ; крупные тайлы — в пределах шума |
-| TAE: тайлы 192/256, прямые свёртки | 192: −5% декодирования; 256 и прямые свёртки медленнее |
-| Пачка картинок (`-b 2`), кэш текстового энкодера | sd.cpp считает пачку циклом; кодирование промпта 0,12 с — выигрыша нет |
-| Слияние RMSNorm(q/k) → ×w → RoPE в один шейдер | тесты проходят, но в графе Anima распределитель кладёт выход RoPE в буфер входа, а выход RoPE переставлен (головы ↔ токены) — слитый шейдер затирал бы непрочитанные строки, проверка перекрытия в ggml отменяет слияние (и вместе с ним RMSNorm+MUL). Откачено |
-| Упакованный fp16 FMA в `mul_mm` (llama.cpp PR #29877) | уже есть в нашем ggml: в машинном коде только `v_pk_fma_f16` |
-| Блокирующее ожидание GPU вместо активного опроса в конце графа | CPU во время шагов 1,3 ядра → ~0,5, но время то же: GPU упирается не в общий лимит мощности |
-| Перебор параметров FA для перекрёстного внимания (KV ~107) | текущие Br16 Bc16 WG64 лучшие; остальные в 1,1–9 раз медленнее |
-| V в FA в f32 (без приведения к f16) | FA +2,9 мс против 0,8 мс на копию — хуже |
-| Перекрёстное внимание как P·(V·W_o) (k = 16·длина текста вместо 2048) | выигрыш только для коротких промптов; при типичных ~90–110 токенах ~0,15 с — не делали |
-| Накладные расходы тайлов декодера | 40 тайлов по ~58 мс почти целиком GPU; подготовка графов ~0,1 с на всё декодирование |
-| FA с выходом в f16 (слитое приведение для выходной проекции) | проекция −0,77 мс, но самовнимание +1 мс за вызов: в сумме ~−13 мс за шаг, в общем времени не видно — откатили |
-| Эпилог «гейт + остаток» без целочисленных делений индекса | время то же: эпилог стоит ~0,5 мс, а разница с обычным умножением была из-за f32-входа |
-| Тайлы для f16-входа | большой тайл для k=8192 по-прежнему лучше среднего (50–59 против 79–86 мс), выбор не меняли |
-| SDXL: тайл для выхода FFN (1280×988, k=5120; 640×3952, k=2560) | в профиле 736–810 GFLOPS против 1150–1320 в отдельном тесте, но тайл уже лучший и в графе (средний медленнее: 21 против 17,5 мс). Причина — накопление в f32, которое sd.cpp включал на Vulkan для `ff.net.2`; заменено на масштаб входа 1/128 (см. пункт 17). f16 вовсе без защиты — −3,5%, но с риском NaN, не включали |
-| Отключить живое превью в интерфейсе (`preview: none`) или делать его один раз вместо шагов 2 и 4 | 23,2–24,6 с на 512×768 во всех вариантах, разница в шуме: превью (`proj`) ничего не стоит |
-| Qwen-Image 2.1 Turbo: 6 и 4 шага вместо 8 (прорежённое турбо-расписание) | 157 и 105 с вместо 209 с, сцена почти та же, но надписи на картинке разваливаются — а текст и есть главное, ради чего эта модель |
-| A/B без подставки | разброс ±1 с из-за нагрева; сравнивать только с остыванием до <55 °C перед каждым прогоном и по 8 шагов, или по профайлеру операций (но он ставит барьеры и может обманывать) |
+| ucache in quality mode | −42% time, but it breaks fine detail and anatomy, extra hands appear |
+| spectrum cache | −30% time, rough colour artefacts |
+| AYS scheduler, 14 steps | −25% time, nearly the same quality but finer textures are worse; Karras kept |
+| AYS, 10 steps | noticeably flatter and poorer in detail |
+| CFG 1 on the last 10 steps | paler and flatter; the optimum is 6 steps |
+| Hires fix (latent, ×1.5) | quality as on Civitai, but 325 s instead of 107; without hires the difference is small |
+| Tile prefetch in the matmul shader | 9% slower: 128 → 176 registers, 2 → 1 wave per SIMD |
+| ROCm (TheRock gfx900 nightly + `HSA_OVERRIDE_GFX_VERSION=9.0.0`) | worked only with Ubuntu's HSA runtime; 3.5× slower than Vulkan, hung the system |
+| Weight quantisation (q8/q4) | will not help: matmul is compute-bound, and Vega has no int8 dot (`int dot: 0`) |
+| Negative embeddings EasyNegative and bad-hands-5 | same speed, but no consistent improvement of hands and anatomy: the image changes about as much as with another seed (4 prompts, A/B) |
+| `performance` power profile and DPM `high` | GPU and memory clocks at maximum (1600/1333 MHz), yet generation is ~10% slower than with `balanced` + `auto`; `performance` + `auto` is the worst |
+| `GGML_VK_ALLOW_GRAPHICS_QUEUE=1` | about 2%, may make the desktop stutter |
+| Upscaler: tiles 64 / 256 / 384, direct convolutions | 32.5 / 38.5 / 44.5 / 31.6 s vs 29.6 s with the default tile of 128 |
+| ROCm for Anima | same as above: Vulkan is faster, ROCm removed |
+| Decoding Anima with the full VAE using direct convolutions | garbage output; `--offload-to-cpu` crashes |
+| TAE `taew2_1` untiled on the GPU (512×768) | a 2.6 GB buffer + the weights — out of memory, the laptop hung. Tiles only |
+| TAE with tiles 256 / 512 / 64 | 128 is the best trade-off: 64 is slower with more visible seams, 256+ use too much memory |
+| Cosmos LoRA instead of Anima Turbo | worse at 4 steps, removed |
+| Turbo v0.2 → v1.1 (4 and 8 steps, 4 prompts) | roughly equal quality: v1.1 is cleaner with sharper outlines, v0.2 more saturated and varied; v1.1 chosen. 8 steps are more detailed for both, but twice as slow |
+| Turbo LoRA at 1–2 steps | the image falls apart |
+| MIGraphX / rocBLAS (ROCm 7.2 unpacked without sudo, gfx900 kernels from 6.3.4, a hipblaslt stub) | ROCm ran; rocBLAS fp16 up to 1.51 TFLOPS on large shapes, but at 512×768 ~37% slower overall than our Vulkan; moving to MIGraphX is not worth porting |
+| Grouped tile order (swizzle) in `mul_mm`, split-K for k=8192 | no gain or slower |
+| Speeding up `mul_mm`: tile sweeps, register prefetch, A in row pairs, B in fp16 | 0–4%: the shader is bound by memory latency (2 waves per SIMD), not compute; at 512×768 it is already ~2× faster than rocBLAS |
+| IREE 3.13 (Vulkan, `cdna1`/`rdna1` targets; no GCN targets) | 0.03–0.40 TFLOPS vs 1.0–1.43 for ggml |
+| TVM (MLC 0.26): dlight 0.14–0.31 TFLOPS; MetaSchedule autotuning | 0.64 TFLOPS after 32 trials, and random kernels longer than 2 s **reset the GPU** (the screen went black, the session crashed) — do not run without a raised timeout |
+| ToDo: 2×2 K/V downsampling in self-attention (sampling, averaging, averaging before RoPE with cell centres and renormalisation) | −7% at 512×768, −24% at 920×1536, but blocks/blur/broken images in every variant: a DiT has no convolutions, local detail flows only through attention |
+| ToMA (simplified: 4×4 tiles, every other token as anchors, soft merge τ=0.01) | in all or the last blocks — pixelation; only middle blocks 8–17: −15%, 4–19: −24…26%, but softer, lower contrast, small details lost — rejected |
+| AMDVLK 2023.Q3.3 (AMD's last official Vulkan driver with Vega; LLPC/LLVM compiler; loaded via `VK_ICD_FILENAMES` without installing) | matmul 0.12–0.22 TFLOPS vs 1.0–1.43 with RADV (6–8× slower), 32 KB shared memory instead of 64, the flash-attention test crashed the GPU (`DeviceLost`) |
+| Mesa 26.2.5 (RADV built locally with libdrm 2.4.133, via `VK_ICD_FILENAMES`) instead of the system 26.0.8 | tests pass; MLP-up/FA microbenchmarks +3–6%, but full generation is **2–4% slower** (512×768: 26.4 → 27.1 s; 920×1536: 133 → 139 s) |
+| ACO compiler changes (Mesa 26.0.8, local build): scheduler reordering windows/limits for LDS, VMEM, clauses; a VGPR cap of 84 for 3 waves | the defaults are best; without the scheduler −35%; at 84 VGPRs the medium tile still gets 2 waves (bound by 8.7 KB of LDS), the large one gets 3 waves but is slower with register spilling (1.08 → 1.01 TFLOPS) |
+| Attention without FA at 512×768 (plain matmuls + softmax) | 28.9 s vs 24.2 s — slower |
+| Flash attention with f16 accumulation (`GGML_PREC_DEFAULT`) | FA +14%, step ~−2%, images look the same, but a risk of f16 overflow on rare prompts — f32 kept |
+| TAE untiled with the default 7 GiB GTT | decoding 2.42 → 1.66 s at 512×768, but together with 4 GB of weights too close to the limit (the laptop hung); enabled automatically only with GTT ≥ 10 GiB |
+| TAE untiled at 768×1152 and above / 256 and 384 px tiles | 768×1152: 5.45 → 6.29 s (slower), peak 8.5 GB; larger tiles are within noise |
+| TAE: 192/256 tiles, direct convolutions | 192: −5% decoding; 256 and direct convolutions are slower |
+| Batch of images (`-b 2`), text encoder cache | sd.cpp computes a batch in a loop; prompt encoding takes 0.12 s — no gain |
+| Fusing RMSNorm(q/k) → ×w → RoPE into one shader (first attempt) | tests pass, but in the Anima graph the allocator puts the RoPE output into the input buffer, and the RoPE output is permuted (heads ↔ tokens) — the fused shader would overwrite unread rows, and ggml's overlap check cancels the fusion (together with RMSNorm+MUL). Reverted, later solved in change 14 |
+| Packed fp16 FMA in `mul_mm` (llama.cpp PR #29877) | already in our ggml: the machine code has only `v_pk_fma_f16` |
+| Blocking GPU wait instead of busy polling at the end of the graph | CPU use during steps 1.3 cores → ~0.5, but the same time: the GPU is not limited by the shared power budget |
+| FA parameter sweep for cross-attention (KV ~107) | the current Br16 Bc16 WG64 are best; the others are 1.1–9× slower |
+| V in FA as f32 (without the cast to f16) | FA +2.9 ms vs 0.8 ms for the copy — worse |
+| Cross-attention as P·(V·W_o) (k = 16·text length instead of 2048) | a gain only for short prompts; with typical ~90–110 tokens ~0.15 s — not done |
+| Decoder tile overhead | 40 tiles of ~58 ms each are almost entirely GPU time; graph preparation is ~0.1 s for the whole decode |
+| FA with f16 output (fused cast for the output projection) | projection −0.77 ms, but self-attention +1 ms per call: ~−13 ms per step in total, not visible overall — reverted |
+| "Gate + residual" epilogue without integer index divisions | same time: the epilogue costs ~0.5 ms, and the difference from a plain matmul came from the f32 input |
+| Tiles for f16 input | the large tile for k=8192 is still better than the medium one (50–59 vs 79–86 ms), the choice was not changed |
+| SDXL: matmul tile for the FFN output (1280×988, k=5120; 640×3952, k=2560) | 736–810 GFLOPS in the profile vs 1150–1320 in an isolated test, but the tile is already the best in the graph too (medium is slower: 21 vs 17.5 ms). The cause is the f32 accumulation sd.cpp enabled on Vulkan for `ff.net.2`; replaced by the 1/128 input scale (see change 17). f16 without any guard is −3.5% but risks NaNs, not enabled |
+| Disabling the live preview in the UI (`preview: none`) or doing it once instead of at steps 2 and 4 | 23.2–24.6 s at 512×768 in every variant, within noise: the preview (`proj`) costs nothing |
+| Qwen-Image 2.1 Turbo: 6 and 4 steps instead of 8 (a thinned turbo schedule) | 157 and 105 s instead of 209 s, the scene is almost the same, but text in the image falls apart — and text is the main reason to use this model |
+| A/B without a cooling pad | ±1 s spread from heat; compare only after cooling to <55 °C before each run and with 8 steps, or with the op profiler (but it inserts barriers and can mislead) |
 
-## Питание: лимиты мощности (RyzenAdj)
+## Power: power limits (RyzenAdj)
 
-Видеокарта упирается не в температуру, а в лимит мощности всего чипа: CPU и GPU делят один бюджет. Телеметрия (`/sys/class/drm/card1/device/gpu_metrics`) во время генерации 512×768 на подставке:
+The GPU is limited not by temperature but by the power limit of the whole chip: the CPU and GPU share one budget. Telemetry (`/sys/class/drm/card1/device/gpu_metrics`) while generating 512×768 on a cooling pad:
 
-| Настройка | Шаги | Мощность | GPU | Память (fclk) | Темп. |
+| Setting | Steps | Power | GPU | Memory (fclk) | Temp. |
 |---|---|---|---|---|---|
-| «Сбалансированный», лимиты Lenovo (STAPM 20, PPT slow **15**, fast 20 Вт) | 28,2 с | 15,3 Вт | 1416 МГц | 800 МГц | 47 °C |
-| «Производительность» | 32,9 с | 10,6 Вт | 1118 МГц | 800 МГц | 43 °C |
-| «Энергосбережение» | 32,9 с | 10,4 Вт | 1114 МГц | 800 МГц | 42 °C |
-| **RyzenAdj 25/25/30 Вт, Tctl 90** | **25,7–26,0 с** | 19,5 Вт | 1588 МГц | 800 МГц | 50–54 °C |
-| RyzenAdj + `power_dpm_force_performance_level=high` | 25,6 с | 20,5 Вт | 1593 МГц | 1333 МГц | 54–59 °C |
-| RyzenAdj + `manual` (память застряла на 400 МГц) | 35,0 с | 16,6 Вт | 1595 МГц | 400 МГц | 50 °C |
+| "Balanced", Lenovo limits (STAPM 20, PPT slow **15**, fast 20 W) | 28.2 s | 15.3 W | 1416 MHz | 800 MHz | 47 °C |
+| "Performance" | 32.9 s | 10.6 W | 1118 MHz | 800 MHz | 43 °C |
+| "Power saver" | 32.9 s | 10.4 W | 1114 MHz | 800 MHz | 42 °C |
+| **RyzenAdj 25/25/30 W, Tctl 90** | **25.7–26.0 s** | 19.5 W | 1588 MHz | 800 MHz | 50–54 °C |
+| RyzenAdj + `power_dpm_force_performance_level=high` | 25.6 s | 20.5 W | 1593 MHz | 1333 MHz | 54–59 °C |
+| RyzenAdj + `manual` (memory stuck at 400 MHz) | 35.0 s | 16.6 W | 1595 MHz | 400 MHz | 50 °C |
 
-- Профиль «Производительность» на T14s Gen 1 AMD работает как энергосбережение (прошивка). Используйте «Сбалансированный».
-- Выше 1600 МГц GPU не разгоняется (`pp_od_clk_voltage`: диапазон 200–1600), поэтому лимит выше 25 Вт не нужен.
-- Частота памяти 1333 вместо 800 даёт ~1,7%, а `high` держит всё на максимуме и в простое — не используем.
+- The "Performance" profile on the T14s Gen 1 AMD behaves like power saving (firmware). Use "Balanced".
+- The GPU does not go above 1600 MHz (`pp_od_clk_voltage`: range 200–1600), so limits above 25 W are not needed.
+- Memory at 1333 instead of 800 MHz gives ~1.7%, and `high` keeps everything at maximum even when idle — not used.
 
-Установка (нужен sudo; RyzenAdj собирается из [FlyGoat/RyzenAdj](https://github.com/FlyGoat/RyzenAdj) v0.19.0, нужен `libpci-dev`):
+Installation (needs sudo; RyzenAdj is built from [FlyGoat/RyzenAdj](https://github.com/FlyGoat/RyzenAdj) v0.19.0, needs `libpci-dev`):
 
 ```bash
 sudo install -m 755 ryzenadj /usr/local/bin/ryzenadj
@@ -289,13 +289,13 @@ sudo install -m 644 power/ryzenadj-limits.service power/ryzenadj-limits.timer /e
 sudo systemctl daemon-reload && sudo systemctl enable --now ryzenadj-limits.timer
 ```
 
-Таймер применяет лимиты через 15 с после загрузки и затем раз в минуту (прошивка может сбрасывать их после сна или смены профиля). Отключить: `sudo systemctl disable --now ryzenadj-limits.timer`.
+The timer applies the limits 15 s after boot and then every minute (the firmware may reset them after sleep or a profile change). To disable: `sudo systemctl disable --now ryzenadj-limits.timer`.
 
-## Подводные камни
+## Pitfalls
 
-### Таймаут драйвера amdgpu (2 секунды)
+### amdgpu driver timeout (2 seconds)
 
-Драйвер сбрасывает задание GPU, если оно выполняется дольше 2 секунд (`lockup_timeout`, по умолчанию 2000 мс). На 896×1344 и больше одно вычисление внимания длится дольше, и генерация падает с `ErrorDeviceLost`. Это касается и исходной сборки. Поднять таймаут только для вычислений (нужен sudo и перезагрузка):
+The driver resets a GPU job that runs longer than 2 seconds (`lockup_timeout`, 2000 ms by default). At 896×1344 and above a single attention computation takes longer, and generation fails with `ErrorDeviceLost`. This also affects the stock build. To raise the timeout for compute only (needs sudo and a reboot):
 
 ```bash
 echo 'options amdgpu lockup_timeout=0,30000,0,0' | sudo tee /etc/modprobe.d/amdgpu-timeout.conf
@@ -305,48 +305,48 @@ echo 'options amdgpu lockup_timeout=0,30000,0,0' | sudo tee /etc/modprobe.d/amdg
 sudo update-initramfs -u
 ```
 
-### Общая память и зависания
+### Shared memory and hangs
 
-GPU и CPU делят 16 ГБ. Если веса модели (Anima f16 — 4,2 ГБ) и буферы вычислений вместе превышают лимит GTT, система не падает с ошибкой, а **намертво зависает**, помогает только перезагрузка. Так было с TAE без тайлов на 512×768 при стандартном лимите, с ROCm, с двумя моделями сразу (интерфейс и `sd-cli`) и с 49 кадрами видео без декодирования по частям. Поэтому: не запускать две генерации одновременно (интерфейс держит один `sd-server`, `gen-anima.sh` и сервер отказываются стартовать рядом с другим процессом), новые разрешения пробовать сначала на малом размере. Память GPU не ограничивается `systemd-run -p MemoryMax`. Зависший `sd-cli`/`sd-server` держит гигабайты GTT: проверьте `pgrep -a 'sd-(cli|server)'` перед запуском.
+The GPU and CPU share 16 GB. If the model weights (Anima f16 — 4.2 GB) and the compute buffers together exceed the GTT limit, the system does not fail with an error but **hangs hard**; only a reboot helps. This happened with untiled TAE at 512×768 under the default limit, with ROCm, with two models at once (the UI and `sd-cli`) and with 49 video frames decoded in one piece. So: do not run two generations at the same time (the UI keeps one `sd-server`, and `gen-anima.sh` and the server refuse to start next to another generation process), and try new resolutions at a small size first. GPU memory is not limited by `systemd-run -p MemoryMax`. A hung `sd-cli`/`sd-server` holds gigabytes of GTT: check `pgrep -a 'sd-(cli|server)'` before starting.
 
-Предел GTT — это не железо, а настройка драйвера: по умолчанию половина ОЗУ (`ttm.pages_limit`). Её можно поднять до 11 ГиБ, дописав в `GRUB_CMDLINE_LINUX_DEFAULT` в `/etc/default/grub` `ttm.pages_limit=2883584 ttm.page_pool_size=2883584`, затем `sudo update-grub` и перезагрузка; проверка — `cat /sys/class/drm/card1/device/mem_info_gtt_total` (11811160064). Скорость от этого не растёт, но интерфейс и `gen-anima.sh` при GTT ≥ 10 ГиБ декодируют до 640×960 без тайлов, на 0,6–0,8 с быстрее (пик 7,0 ГБ на 640×960; на 768×1152 без тайлов уже медленнее). Память GPU не ограничивается `MemoryMax` в systemd, поэтому системе, браузеру и текстовому энкодеру нужно оставить ~3 ГБ: больше 11–11,5 ГиБ ставить не стоит.
+The GTT limit is not hardware but a driver setting: half of the RAM by default (`ttm.pages_limit`). It can be raised to 11 GiB by adding `ttm.pages_limit=2883584 ttm.page_pool_size=2883584` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then `sudo update-grub` and a reboot; check with `cat /sys/class/drm/card1/device/mem_info_gtt_total` (11811160064). It does not make anything faster by itself, but with GTT ≥ 10 GiB the UI and `gen-anima.sh` decode untiled up to 640×960, 0.6–0.8 s faster (peak 7.0 GB at 640×960; at 768×1152 untiled is already slower). GPU memory is not limited by systemd's `MemoryMax`, so leave ~3 GB for the system, the browser and the text encoder: do not go above 11–11.5 GiB.
 
-### Прогрев
+### Heat
 
-После часа непрерывной генерации сэмплирование замедляется примерно на 8% (71 → 77 с). Режим питания «Производительность» и хорошее охлаждение помогают.
+After an hour of continuous generation sampling slows down by about 8% (71 → 77 s). Good cooling helps.
 
 ### Hires fix
 
-sd.cpp умеет его сам: `--hires --hires-upscaler "Latent (nearest-exact)" --hires-denoising-strength 0.55`. Отдельный апскейлер не нужен, так делают авторы картинок на Civitai. Больше 768×1152 упирается в таймаут выше, а VAE на таком размере нужно декодировать по тайлам (`--vae-tiling`).
+sd.cpp does it itself: `--hires --hires-upscaler "Latent (nearest-exact)" --hires-denoising-strength 0.55`. No separate upscaler is needed; this is how image authors on Civitai do it. Above 768×1152 it hits the timeout above, and the VAE has to decode in tiles at that size (`--vae-tiling`).
 
-## Профилирование
+## Profiling
 
-Время каждой операции GPU по шагам:
+Time of every GPU op per step:
 
 ```bash
 GGML_VK_PERF_LOGGER=1 tools/bin-opt-sd-cli ... 2> perf.txt
 ```
 
-Замеры форм UNet:
+UNet shape benchmarks:
 
 ```bash
 SD_UNET_PERF=1 build-src/stable-diffusion.cpp/build/bin/test-backend-ops perf -b Vulkan0 -o MUL_MAT
 ```
 
-Статистика регистров и волн для шейдеров:
+Register and wave statistics for the shaders:
 
 ```bash
 RADV_DEBUG=shaderstats,nocache ...
 ```
 
-Типичная раскладка одного прохода UNet на 512×768: умножение матриц 57%, внимание 20%, im2col 6%, остальное — мелочи. У Anima ещё больше упирается в умножение матриц, то есть в потолок железа.
+A typical breakdown of one UNet pass at 512×768: matmul 57%, attention 20%, im2col 6%, the rest is small. Anima is even more bound by matmul, i.e. by the hardware ceiling.
 
-## Открытые направления
+## Open directions
 
-- Прямые свёртки (`conv2d direct`) на Vega не проходят проверку sd.cpp и выключены, всё идёт через im2col: в декодере taesdxl im2col — 60% времени, в шаге SDXL ~3,5%.
-- Дистилляция Anima в 2 шага, слияние токенов с приемлемым качеством, адаптеры большего текстового энкодера для Anima (есть только для ComfyUI/Forge).
-- Любое направление: сначала профиль, потом изменение, тесты корректности (`test-backend-ops`, ни одного FAIL), A/B поочерёдно со старым бинарником, сравнение картинок глазами.
+- Direct convolutions (`conv2d direct`) fail sd.cpp's probe on Vega and are disabled, so everything goes through im2col: in the taesdxl decoder im2col is 60% of the time, in an SDXL step ~3.5%.
+- Distilling Anima to 2 steps, token merging with acceptable quality, adapters for a larger text encoder for Anima (only available for ComfyUI/Forge so far).
+- For any direction: profile first, then change, then correctness tests (`test-backend-ops`, zero FAILs), A/B alternating with the old binary, and comparing the images by eye.
 
-## Лицензия
+## License
 
-Код и патчи — MIT (как stable-diffusion.cpp и ggml). Модели — по лицензиям их авторов.
+Code and patches — MIT (like stable-diffusion.cpp and ggml). Models — under their authors' licenses.
