@@ -43,6 +43,47 @@ Time per image with the model already in memory (UI or `sd-server`), RyzenAdj po
 
 The patch was first tuned on SD1.5 (an anime checkpoint, 20 steps, CFG 7): 512×768 took ~80–85 s. For comparison, the only public measurement found on similar hardware is a desktop Ryzen 5 5600G (Vega 7, 65 W) running SD 1.4 via ROCm: ~3 s per step at 512×512 ([blog](https://www.gabriel.urdhr.fr/2022/08/28/trying-to-run-stable-diffusion-on-amd-ryzen-5-5600g/)); here the same amount of work takes ~2.5 s.
 
+## Gallery
+
+The same four SFW scenes on every model: a knight, a mountain lake, a night city, a cat. Seed 42, the first result with no cherry-picking or retouching, CFG 1 everywhere. Time per image with the model already loaded (prompt encoding and decoding included); the laptop ran without a cooling pad at Tctl 84–98 °C, Anima and SDXL match the results table, while the long Qwen-Image and Kromoss runs heated the chip and came out 20–25% slower than there. Anima and SDXL went through the UI's `sd-server`, Qwen-Image and Kromoss through `sd-cli` (`generate_image` time, without loading).
+
+| Model and settings | Knight | Lake | City | Cat |
+|---|---|---|---|---|
+| **MiaoMiao 3D Harem (Anima 2B)**<br>+ Anima Turbo v1.1, 4 steps, euler / discrete, 512×768 | <img src="docs/gallery/anima-portrait.jpg" width="150"><br>24.2 s | <img src="docs/gallery/anima-landscape.jpg" width="150"><br>23.7 s | <img src="docs/gallery/anima-city.jpg" width="150"><br>24.2 s | <img src="docs/gallery/anima-cat.jpg" width="150"><br>23.9 s |
+| **MiaoMiao Anime Reality (Anima 2B)**<br>+ Anima Turbo v1.1, 4 steps, euler / discrete, 512×768 | <img src="docs/gallery/animereal-portrait.jpg" width="150"><br>24.5 s | <img src="docs/gallery/animereal-landscape.jpg" width="150"><br>23.9 s | <img src="docs/gallery/animereal-city.jpg" width="150"><br>24.2 s | <img src="docs/gallery/animereal-cat.jpg" width="150"><br>24.4 s |
+| **MiaoMiao RealSkin 1.3 (Anima 2B)**<br>+ Anima Turbo v1.1, 4 steps, euler / discrete, 512×768 | <img src="docs/gallery/realskin-portrait.jpg" width="150"><br>24.2 s | <img src="docs/gallery/realskin-landscape.jpg" width="150"><br>23.9 s | <img src="docs/gallery/realskin-city.jpg" width="150"><br>24.2 s | <img src="docs/gallery/realskin-cat.jpg" width="150"><br>23.9 s |
+| **MiaoMiao Harem 2.9B β1.1**<br>+ Turbo-ANIMA V4-29B, 4 steps, euler / sgm_uniform, 512×768 | <img src="docs/gallery/harem29-portrait.jpg" width="150"><br>37.3 s | <img src="docs/gallery/harem29-landscape.jpg" width="150"><br>38.8 s | <img src="docs/gallery/harem29-city.jpg" width="150"><br>39.0 s | <img src="docs/gallery/harem29-cat.jpg" width="150"><br>38.3 s |
+| **MiaoMiao RealSkin 2.9B 1.0**<br>+ Turbo-ANIMA V4-29B, 4 steps, euler / sgm_uniform, 512×768 | <img src="docs/gallery/realskin29-portrait.jpg" width="150"><br>39.1 s | <img src="docs/gallery/realskin29-landscape.jpg" width="150"><br>38.8 s | <img src="docs/gallery/realskin29-city.jpg" width="150"><br>39.0 s | <img src="docs/gallery/realskin29-cat.jpg" width="150"><br>38.3 s |
+| **JANKU v7.77 (SDXL, NoobAI)**<br>+ DMD2 4-step LoRA (A1), 4 steps, euler_a / gits, clip skip 2, 832×1216 | <img src="docs/gallery/janku-portrait.jpg" width="150"><br>44.6 s | <img src="docs/gallery/janku-landscape.jpg" width="150"><br>38.8 s | <img src="docs/gallery/janku-city.jpg" width="150"><br>38.3 s | <img src="docs/gallery/janku-cat.jpg" width="150"><br>38.6 s |
+| **Qwen-Image 2.1 Turbo Q5_K_S**<br>8 steps, euler, turbo sigmas, taeqi2_1, 512×768 | <img src="docs/gallery/qwen-portrait.jpg" width="150"><br>4:24 | <img src="docs/gallery/qwen-landscape.jpg" width="150"><br>3:51 | <img src="docs/gallery/qwen-city.jpg" width="150"><br>4:26 | <img src="docs/gallery/qwen-cat.jpg" width="150"><br>4:24 |
+| **Kromoss (MOSS-Image 5B) Q6_K**<br>+ 8-steps DMD2 LoRA, 4 steps, euler, full FLUX.2 VAE, 512×768 | <img src="docs/gallery/kromoss-portrait.jpg" width="150"><br>2:27 | <img src="docs/gallery/kromoss-landscape.jpg" width="150"><br>2:27 | <img src="docs/gallery/kromoss-city.jpg" width="150"><br>2:26 | <img src="docs/gallery/kromoss-cat.jpg" width="150"><br>2:21 |
+
+Anima finetunes have the turbo LoRA baked in with `anima/merge_lora.py`; this repo's `download.sh` fetches the official `anima-turbo-v1.1` instead, which is in the same class. The ~24 s and ~38 s of Anima 2B and 2.9B and ~40 s of SDXL are the same for any finetune of the same size.
+
+<details><summary>Prompts</summary>
+
+Anima / SDXL (booru tags; the quality prefix differs per model, see `gui/server.py`):
+
+```
+best quality, score_7, score_9, very aesthetic, ultra detailed, [photorealistic, raw photo, photo background,]
+knight:  1girl, adult, solo, knight, silver armor, long red hair, holding sword, castle courtyard, banners, upper body, looking at viewer, determined
+lake:    no humans, scenery, mountain lake, sunrise, pine forest, mist, wooden pier, reflection, clouds
+city:    1boy, adult, solo, from behind, hooded jacket, transparent umbrella, cyberpunk city, night, rain, neon lights, neon sign, reflections, street
+cat:     no humans, orange cat, sleeping, curled up, windowsill, sunlight, potted plant, cozy room
+SDXL prefix: lazypos, masterpiece, best quality, general,
+```
+
+Qwen-Image / Kromoss (natural language):
+
+```
+knight:  An adult woman knight with long red hair in polished silver armor holding a sword, standing in a castle courtyard with banners, upper body, looking at the viewer with a determined expression
+lake:    A calm mountain lake at sunrise surrounded by pine forest, morning mist, a wooden pier, clouds reflected in the water, no people
+city:    An adult man in a hooded jacket with a transparent umbrella seen from behind on a cyberpunk city street at night, rain, neon lights reflecting on the wet road, a large neon sign that says "VEGA 7"
+cat:     An orange cat sleeping curled up on a sunlit windowsill next to a potted plant in a cozy room
+```
+
+</details>
+
 ## Quick start
 
 ### 1. Dependencies

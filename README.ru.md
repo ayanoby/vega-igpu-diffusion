@@ -43,6 +43,47 @@
 
 Раньше патч настраивался на SD1.5 (аниме-чекпоинт, 20 шагов, CFG 7): 512×768 — ~80–85 с. Для сравнения, единственный найденный публичный замер на похожем железе — настольный Ryzen 5 5600G (Vega 7, 65 Вт), SD 1.4 через ROCm: ~3 с на шаг на 512×512 ([блог](https://www.gabriel.urdhr.fr/2022/08/28/trying-to-run-stable-diffusion-on-amd-ryzen-5-5600g/)); здесь в пересчёте на ту же работу ~2,5 с.
 
+## Галерея
+
+Одни и те же четыре SFW-сцены на каждой модели: рыцарь, горное озеро, ночной город, кот. Seed 42, первый результат без отбора и ретуши, везде CFG 1. Время на картинку с уже загруженной моделью (вместе с кодированием промпта и декодером); ноутбук без охлаждающей подставки, Tctl 84–98 °C, Anima и SDXL совпадают с таблицей результатов, а долгие Qwen-Image и Kromoss нагрели чип и вышли на 20–25% медленнее, чем там. Anima и SDXL шли через `sd-server` интерфейса, Qwen-Image и Kromoss через `sd-cli` (время `generate_image`, без загрузки).
+
+| Модель и настройки | Рыцарь | Озеро | Город | Кот |
+|---|---|---|---|---|
+| **MiaoMiao 3D Harem (Anima 2B)**<br>+ Anima Turbo v1.1, 4 шага, euler / discrete, 512×768 | <img src="docs/gallery/anima-portrait.jpg" width="150"><br>24,2 с | <img src="docs/gallery/anima-landscape.jpg" width="150"><br>23,7 с | <img src="docs/gallery/anima-city.jpg" width="150"><br>24,2 с | <img src="docs/gallery/anima-cat.jpg" width="150"><br>23,9 с |
+| **MiaoMiao Anime Reality (Anima 2B)**<br>+ Anima Turbo v1.1, 4 шага, euler / discrete, 512×768 | <img src="docs/gallery/animereal-portrait.jpg" width="150"><br>24,5 с | <img src="docs/gallery/animereal-landscape.jpg" width="150"><br>23,9 с | <img src="docs/gallery/animereal-city.jpg" width="150"><br>24,2 с | <img src="docs/gallery/animereal-cat.jpg" width="150"><br>24,4 с |
+| **MiaoMiao RealSkin 1.3 (Anima 2B)**<br>+ Anima Turbo v1.1, 4 шага, euler / discrete, 512×768 | <img src="docs/gallery/realskin-portrait.jpg" width="150"><br>24,2 с | <img src="docs/gallery/realskin-landscape.jpg" width="150"><br>23,9 с | <img src="docs/gallery/realskin-city.jpg" width="150"><br>24,2 с | <img src="docs/gallery/realskin-cat.jpg" width="150"><br>23,9 с |
+| **MiaoMiao Harem 2.9B β1.1**<br>+ Turbo-ANIMA V4-29B, 4 шага, euler / sgm_uniform, 512×768 | <img src="docs/gallery/harem29-portrait.jpg" width="150"><br>37,3 с | <img src="docs/gallery/harem29-landscape.jpg" width="150"><br>38,8 с | <img src="docs/gallery/harem29-city.jpg" width="150"><br>39,0 с | <img src="docs/gallery/harem29-cat.jpg" width="150"><br>38,3 с |
+| **MiaoMiao RealSkin 2.9B 1.0**<br>+ Turbo-ANIMA V4-29B, 4 шага, euler / sgm_uniform, 512×768 | <img src="docs/gallery/realskin29-portrait.jpg" width="150"><br>39,1 с | <img src="docs/gallery/realskin29-landscape.jpg" width="150"><br>38,8 с | <img src="docs/gallery/realskin29-city.jpg" width="150"><br>39,0 с | <img src="docs/gallery/realskin29-cat.jpg" width="150"><br>38,3 с |
+| **JANKU v7.77 (SDXL, NoobAI)**<br>+ DMD2 LoRA на 4 шага (A1), 4 шага, euler_a / gits, clip skip 2, 832×1216 | <img src="docs/gallery/janku-portrait.jpg" width="150"><br>44,6 с | <img src="docs/gallery/janku-landscape.jpg" width="150"><br>38,8 с | <img src="docs/gallery/janku-city.jpg" width="150"><br>38,3 с | <img src="docs/gallery/janku-cat.jpg" width="150"><br>38,6 с |
+| **Qwen-Image 2.1 Turbo Q5_K_S**<br>8 шагов, euler, турбо-сигмы, taeqi2_1, 512×768 | <img src="docs/gallery/qwen-portrait.jpg" width="150"><br>4:24 | <img src="docs/gallery/qwen-landscape.jpg" width="150"><br>3:51 | <img src="docs/gallery/qwen-city.jpg" width="150"><br>4:26 | <img src="docs/gallery/qwen-cat.jpg" width="150"><br>4:24 |
+| **Kromoss (MOSS-Image 5B) Q6_K**<br>+ 8-steps DMD2 LoRA, 4 шага, euler, полный VAE FLUX.2, 512×768 | <img src="docs/gallery/kromoss-portrait.jpg" width="150"><br>2:27 | <img src="docs/gallery/kromoss-landscape.jpg" width="150"><br>2:27 | <img src="docs/gallery/kromoss-city.jpg" width="150"><br>2:26 | <img src="docs/gallery/kromoss-cat.jpg" width="150"><br>2:21 |
+
+У файнтюнов Anima турбо-LoRA вшита через `anima/merge_lora.py`; `download.sh` этого репозитория качает официальную `anima-turbo-v1.1` того же класса. ~24 с у Anima 2B, ~38 с у 2.9B и ~40 с у SDXL одинаковы для любого файнтюна того же размера.
+
+<details><summary>Промпты</summary>
+
+Anima / SDXL (теги booru; префикс качества у каждой модели свой, см. `gui/server.py`):
+
+```
+best quality, score_7, score_9, very aesthetic, ultra detailed, [photorealistic, raw photo, photo background,]
+knight:  1girl, adult, solo, knight, silver armor, long red hair, holding sword, castle courtyard, banners, upper body, looking at viewer, determined
+lake:    no humans, scenery, mountain lake, sunrise, pine forest, mist, wooden pier, reflection, clouds
+city:    1boy, adult, solo, from behind, hooded jacket, transparent umbrella, cyberpunk city, night, rain, neon lights, neon sign, reflections, street
+cat:     no humans, orange cat, sleeping, curled up, windowsill, sunlight, potted plant, cozy room
+SDXL prefix: lazypos, masterpiece, best quality, general,
+```
+
+Qwen-Image / Kromoss (естественный язык):
+
+```
+knight:  An adult woman knight with long red hair in polished silver armor holding a sword, standing in a castle courtyard with banners, upper body, looking at the viewer with a determined expression
+lake:    A calm mountain lake at sunrise surrounded by pine forest, morning mist, a wooden pier, clouds reflected in the water, no people
+city:    An adult man in a hooded jacket with a transparent umbrella seen from behind on a cyberpunk city street at night, rain, neon lights reflecting on the wet road, a large neon sign that says "VEGA 7"
+cat:     An orange cat sleeping curled up on a sunlit windowsill next to a potted plant in a cozy room
+```
+
+</details>
+
 ## Быстрый старт
 
 ### 1. Зависимости
