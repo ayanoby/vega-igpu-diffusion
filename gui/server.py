@@ -164,15 +164,15 @@ class Backend:
     """One sd-server with the current mode's model loaded; only one model fits in the GPU memory at a time."""
 
     def __init__(self):
-        self.mode, self.proc, self.log = None, None, os.path.join(DATA, "backend.log")
+        self.mode, self.tiled, self.proc, self.log = None, False, None, os.path.join(DATA, "backend.log")
         self.lock = threading.Lock()
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def ensure(self, mode):
+    def ensure(self, mode, tiled=False):
         with self.lock:
-            if self.mode == mode and self.alive():
+            if self.mode == mode and self.tiled == tiled and self.alive():
                 return
             self._stop()
             # a second copy of the model does not fit next to this one in the shared GPU memory (GTT): the kernel
@@ -186,8 +186,9 @@ class Backend:
             m = MODES[mode]
             with open(self.log, "wb") as log:
                 self.proc = subprocess.Popen([SD_SERVER, "--listen-port", str(BACKEND_PORT)] + m["args"], cwd=m["cwd"],
+                                             env=dict(os.environ, SD_VK_TILE="1") if tiled else None,
                                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            self.mode = mode
+            self.mode, self.tiled = mode, tiled
             deadline = time.time() + 300
             while time.time() < deadline:
                 if not self.alive():
@@ -216,11 +217,18 @@ class Backend:
                 self.proc.wait(15)
             except subprocess.TimeoutExpired:
                 os.killpg(self.proc.pid, signal.SIGKILL)
-        self.proc, self.mode = None, None
+        self.proc, self.mode, self.tiled = None, None, False
 
     def stop(self):
         with self.lock:
             self._stop()
+
+
+def use_tiled(mode, loras):
+    """F16 Anima weights are stored in 64x32 tiles (SD_VK_TILE=1): the Vulkan matmul reads them 5-35% faster, ~6-8% per image,
+    same pixels. Weights stay tiled for the whole life of the process, so a LoRA (applied to the weights) needs an untiled
+    backend: the next job with LoRAs restarts it."""
+    return MODES[mode]["cwd"] == ANIMA and not loras and os.environ.get("SD_VK_NO_TILE") != "1"
 
 
 backend = Backend()
@@ -305,7 +313,7 @@ def generate_one(job, index):
         preview_png = b""
     t0 = time.time()
     try:
-        backend.ensure(job["mode"])
+        backend.ensure(job["mode"], use_tiled(job["mode"], job["loras"]))
         with lock:
             current["phase"] = "generating"
         w, h = map(int, job["size"].split("x"))
@@ -605,7 +613,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def preload(mode):
         try:
-            backend.ensure(mode)
+            backend.ensure(mode, use_tiled(mode, []))
         except RuntimeError as e:
             report_failure(1, [str(e)])
 

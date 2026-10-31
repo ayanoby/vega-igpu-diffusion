@@ -531,6 +531,70 @@ index 6b94bcb..9b53f87 100644
              x = ggml_ext_pad_ext(ctx->ggml_ctx, ctx->backend, x, lp0, rp0, lp1, rp1, lp2, rp2, 0, 0, ctx->circular_x_enabled, ctx->circular_y_enabled);
              if (w->ne[2] == 1 && x->ne[2] == 1 && x->ne[3] == in_channels) {
                  // One frame through a one-frame-deep kernel is a 2D conv; backends without
+diff --git a/src/model_manager.cpp b/src/model_manager.cpp
+index 243811d..7fc440f 100644
+--- a/src/model_manager.cpp
++++ b/src/model_manager.cpp
+@@ -11,6 +11,26 @@
+ #include "core/util.h"
+ #include "model/adapter/lora.hpp"
+ 
++// Vulkan backend extension (ggml-vulkan.h); weak so that builds without the Vulkan backend still link
++extern "C" bool ggml_backend_vk_tile_f16_weight(struct ggml_tensor* tensor) __attribute__((weak));
++
++// Anima DiT weights whose matmul always has more than 8 columns: self-attention, cross-attention q and output, MLP
++static bool vk_tile_candidate(const std::string& name) {
++    if (name.find("blocks.") == std::string::npos || name.find("llm_adapter") != std::string::npos) {
++        return false;
++    }
++    static const char* suffixes[] = {"self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight",
++                                     "self_attn.output_proj.weight", "cross_attn.q_proj.weight", "cross_attn.output_proj.weight",
++                                     "mlp.layer1.weight", "mlp.layer2.weight"};
++    for (const char* suffix : suffixes) {
++        const std::string sfx(suffix);
++        if (name.size() >= sfx.size() && name.compare(name.size() - sfx.size(), sfx.size(), sfx) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ static size_t aligned_offset(const void* buffer, size_t offset, size_t alignment) {
+     GGML_ASSERT(alignment != 0 && (alignment & (alignment - 1)) == 0);
+     size_t align = (alignment - ((reinterpret_cast<uintptr_t>(buffer) + offset) % alignment)) % alignment;
+@@ -472,6 +492,21 @@ bool ModelManager::load_tensors_to_params_backend(const std::vector<TensorState*
+         }
+         return false;
+     }
++    if (ggml_backend_vk_tile_f16_weight != nullptr && loras_.empty()) {
++        const char* tile_env = getenv("SD_VK_TILE");
++        if (tile_env != nullptr && tile_env[0] == '1') {
++            size_t tiled = 0;
++            for (TensorState* state : need_load) {
++                if (state != nullptr && state->tensor != nullptr && vk_tile_candidate(state->name) &&
++                    ggml_backend_vk_tile_f16_weight(state->tensor)) {
++                    ++tiled;
++                }
++            }
++            if (tiled > 0) {
++                LOG_INFO("tiled %zu f16 weights for the Vulkan matmul", tiled);
++            }
++        }
++    }
+     struct PrepareStats {
+         size_t bytes   = 0;
+         size_t tensors = 0;
+@@ -650,6 +685,10 @@ bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states
+         if (state->applied_lora_epoch == current_lora_epoch_) {
+             continue;
+         }
++        if ((state->tensor->flags & GGML_TENSOR_FLAG_TILED_F16) != 0) {
++            LOG_ERROR("lora cannot be applied to the tiled weight '%s'; run without SD_VK_TILE=1", state->name.c_str());
++            return false;
++        }
+         if (state->compute_backend == nullptr) {
+             LOG_ERROR("model manager compute backend is null for lora target tensor '%s'", state->name.c_str());
+             return false;
 diff --git a/src/name_conversion.cpp b/src/name_conversion.cpp
 index f37c4dd..a90e82a 100644
 --- a/src/name_conversion.cpp

@@ -7,6 +7,8 @@
 # untiled it needs ~2.6 GB at 512x768, which together with the weights exhausted the shared memory and froze the laptop.
 # VAE=full ./gen-anima.sh ... uses the full Qwen-Image VAE (512x384 tiles) instead
 cd "$(dirname "$0")"
+# tiled f16 weights: ~6-8% faster, same pixels; not with a <lora:...> tag in the prompt (it is applied to the weights)
+case "$1" in *"<lora:"*) ;; *) export SD_VK_TILE=${SD_VK_TILE:-1} ;; esac
 mkdir -p out
 # two copies of the model do not fit in the shared GPU memory (GTT): the kernel starts evicting and the laptop can hang
 if [ -z "$FORCE" ] && ps -eo stat=,comm= | awk '$1 !~ /Z/ && $2 ~ /^(bin-opt-sd-cli|bin-opt-sd-serv|sd-cli|sd-server)$/ {f=1} END {exit !f}'; then
