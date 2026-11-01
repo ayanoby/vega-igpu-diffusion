@@ -38,7 +38,7 @@
 | SDXL + DMD2 | 1024×1536 | ~1:02 |
 | Qwen-Image 2.1 Turbo (Q5_K_S), 8 шагов | 512×768 | ~3,5 мин |
 | Kromoss (MOSS-Image 5B, Q6_K) + DMD2-LoRA, 4 шага | 512×768 | ~2 мин |
-| LTX-2.5 22B (видео со звуком, distilled Q2_K_XL), 8 шагов | 384×256, 9 кадров | 3 мин; 512×768 × 17 кадров ~7 мин (без звука, патч sd.cpp; двухэтапная схема быстрее, но пикселит), см. [docs/ltx-experiments.md](docs/ltx-experiments.md) |
+| LTX-2.5 22B (видео со звуком, distilled Q2_K_XL), 8 шагов | 384×256, 9 кадров | 3 мин; 512×768 × 17 кадров ~3,3 мин (3 шага, без звука, патч sd.cpp; 8 шагов ~7 мин), см. [docs/ltx-experiments.md](docs/ltx-experiments.md) |
 | Wan 2.2 TI2V 5B Turbo (Q4_K_M), 4 шага, 33 кадра | 512×768 | ~4:15 |
 | Апскейл ×2 (realesr-animevideov3) | 512×768 → 1024×1536 | ~1,6 с |
 
