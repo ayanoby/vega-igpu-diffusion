@@ -2217,10 +2217,18 @@ index ea77a3d..f032e21 100644
      }
  }
 diff --git a/src/ggml-vulkan/vulkan-shaders/mul_mm.comp b/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
-index 19d3787..b41d2c4 100644
+index 19d3787..bbf207f 100644
 --- a/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
 +++ b/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
-@@ -125,6 +125,9 @@ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
+@@ -63,6 +63,7 @@ uint mm_load_vec_a() {
+     case GGML_TYPE_Q5_0:
+     case GGML_TYPE_Q8_0:
+     case GGML_TYPE_Q2_K:
++    case GGML_TYPE_Q3_K:
+     case GGML_TYPE_Q4_K:
+     case GGML_TYPE_Q5_K:
+         return 4u;
+@@ -125,6 +126,9 @@ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
  #ifdef MUL_MAT_ID
  layout (binding = 3) readonly buffer IDS {int data_ids[];};
  layout (binding = 4) readonly buffer RowMap {uint data_row_map[];};
@@ -2230,7 +2238,7 @@ index 19d3787..b41d2c4 100644
  #endif
  
  layout (push_constant) uniform parameter
-@@ -155,6 +158,13 @@ layout (push_constant) uniform parameter
+@@ -155,6 +159,13 @@ layout (push_constant) uniform parameter
      uint ne12;
      uint broadcast2;
      uint broadcast3;
@@ -2244,7 +2252,7 @@ index 19d3787..b41d2c4 100644
  #endif
  } p;
  
-@@ -168,6 +178,7 @@ layout (constant_id = 7) const uint TM = 4;
+@@ -168,6 +179,7 @@ layout (constant_id = 7) const uint TM = 4;
  layout (constant_id = 8) const uint TN = 2;
  layout (constant_id = 9) const uint TK = 1;  // Only needed for coopmat
  layout (constant_id = 10) const uint WARP = 32;
@@ -2252,7 +2260,7 @@ index 19d3787..b41d2c4 100644
  
  #if defined(DATA_A_F32) || defined(DATA_A_F16)
  #define BK 32
-@@ -207,6 +218,9 @@ shared ACC_TYPE coopmat_stage[TM * TN * NUM_WARPS];
+@@ -207,6 +219,9 @@ shared ACC_TYPE coopmat_stage[TM * TN * NUM_WARPS];
  #include "iq_shmem_init.glsl"
  #endif
  
@@ -2262,7 +2270,7 @@ index 19d3787..b41d2c4 100644
  void main() {
  #ifdef MUL_MAT_ID
      const uint tile_idx = gl_WorkGroupID.y + gl_WorkGroupID.z * gl_NumWorkGroups.y;
-@@ -519,11 +533,25 @@ void main() {
+@@ -519,11 +534,25 @@ void main() {
                          data_d[row_idx.y * p.batch_stride_d + row_idx.x * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
                      }
  #else
@@ -2291,7 +2299,7 @@ index 19d3787..b41d2c4 100644
  #endif // MUL_MAT_ID
                  }
 diff --git a/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl b/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl
-index 588fb73..d39ad50 100644
+index 588fb73..4737d07 100644
 --- a/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl
 +++ b/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl
 @@ -1,3 +1,5 @@
@@ -2331,6 +2339,46 @@ index 588fb73..d39ad50 100644
          const uint k_pair = row * LOAD_VEC_A / 2;
          FLOAT_TYPEV4 aa = FLOAT_TYPEV4(data_a[idx]);
          store_a(col, k_pair,     aa.xy);
+@@ -480,13 +497,12 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
+         const uint idx = pos_a + col * p.stride_a / mm_load_vec_a() + row;
+         const uint k_pair = row * mm_load_vec_a() / 2;
+ 
+-        const uint ib = idx / 128;                   // 2 values per idx
+-        const uint iqs = idx % 128;                  // 0..127
++        const uint ib = idx / 64;                    // 4 values per idx
++        const uint iqs = (idx % 64) * 2;             // 0,2,4..126: the first of two pairs sharing the scale
+ 
+         const uint n = iqs / 64;                     // 0,1
+-        const uint qsi = n * 32 + (iqs % 16) * 2;    // 0,2,4..62
+-        const uint hmi =          (iqs % 16) * 2;    // 0,2,4..30
+-        const uint j = (iqs % 64) / 4;               // 0..3
++        const uint qsi = n * 32 + (iqs % 16) * 2;    // 0,4,8..60
++        const uint hmi =          (iqs % 16) * 2;    // 0,4,8..28
+         const uint is = iqs / 8;                     // 0..15
+         const uint halfsplit = ((iqs % 64) / 16);    // 0,1,2,3
+         const uint qsshift = halfsplit * 2;          // 0,2,4,6
+@@ -495,11 +511,17 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
+                                 | (((a_q3_k.data[ib].scales[8 + (is % 4)] >> (2 * int(is / 4))) & 3) << 4));
+         const float dl = float(a_q3_k.data[ib].d) * float(us - 32);
+ 
+-        const vec2 qs = vec2(unpack8((uint(a_q3_k_p16.data[ib].qs[qsi / 2]) >> qsshift) & 0x0303).xy);
+-        const vec2 hm = vec2(unpack8(((uint(a_q3_k_p16.data[ib].hmask[hmi / 2]) >> (4 * n + halfsplit)) & 0x0101 ^ 0x0101) << 2).xy);
++        const uint qw0 = uint(a_q3_k_p16.data[ib].qs[qsi / 2]);
++        const uint qw1 = uint(a_q3_k_p16.data[ib].qs[qsi / 2 + 1]);
++        const uint hw0 = uint(a_q3_k_p16.data[ib].hmask[hmi / 2]);
++        const uint hw1 = uint(a_q3_k_p16.data[ib].hmask[hmi / 2 + 1]);
++        const vec4 qs = vec4(vec2(unpack8((qw0 >> qsshift) & 0x0303).xy), vec2(unpack8((qw1 >> qsshift) & 0x0303).xy));
++        const vec4 hm = vec4(vec2(unpack8(((hw0 >> (4 * n + halfsplit)) & 0x0101 ^ 0x0101) << 2).xy),
++                             vec2(unpack8(((hw1 >> (4 * n + halfsplit)) & 0x0101 ^ 0x0101) << 2).xy));
++        const vec4 v = dl * (qs - hm);
+ 
+-        store_a(col, k_pair, FLOAT_TYPEV2(dl * (qs.x - hm.x),
+-                                        dl * (qs.y - hm.y)));
++        store_a(col, k_pair, FLOAT_TYPEV2(v.xy));
++        store_a(col, k_pair + 1, FLOAT_TYPEV2(v.zw));
+ 
+     } else if (MmTypeA == GGML_TYPE_Q4_K) {
+         const uint idx = pos_a + col * p.stride_a / mm_load_vec_a() + row;
 diff --git a/src/ggml-vulkan/vulkan-shaders/norm_mul_add.comp b/src/ggml-vulkan/vulkan-shaders/norm_mul_add.comp
 new file mode 100644
 index 0000000..e618c5d
