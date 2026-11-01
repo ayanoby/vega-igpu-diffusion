@@ -1,3 +1,159 @@
+diff --git a/src/conditioning/conditioning_cache.h b/src/conditioning/conditioning_cache.h
+index 34648c9..b83f13c 100644
+--- a/src/conditioning/conditioning_cache.h
++++ b/src/conditioning/conditioning_cache.h
+@@ -2,7 +2,12 @@
+ #define __SD_CONDITIONING_CONDITIONING_CACHE_H__
+ 
+ #include <algorithm>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
+ #include <list>
++#include <string>
+ #include <tuple>
+ 
+ #include "conditioning/conditioner.hpp"
+@@ -70,6 +75,101 @@ class ConditioningCache {
+         return true;
+     }
+ 
++    // Optional persistent cache (SD_COND_CACHE_DIR): text-only conditions that consist of cross-attention tensors only, e.g. the
++    // LTX prompt embeddings. The directory must belong to one text encoder; the file name is a hash of the prompt parameters.
++    static std::string disk_path(const ConditionerParams& p) {
++        const char* dir = std::getenv("SD_COND_CACHE_DIR");
++        if (dir == nullptr || *dir == '\0' || (p.ref_images != nullptr && !p.ref_images->empty()) ||
++            (p.minimax_h3_references != nullptr && !p.minimax_h3_references->empty())) {
++            return "";
++        }
++        uint64_t h = 1469598103934665603ULL;
++        auto mix   = [&h](const void* data, size_t n) {
++            for (size_t i = 0; i < n; i++) {
++                h = (h ^ static_cast<const unsigned char*>(data)[i]) * 1099511628211ULL;
++            }
++        };
++        mix(p.text.data(), p.text.size());
++        mix(&p.clip_skip, sizeof(p.clip_skip));
++        mix(&p.width, sizeof(p.width));
++        mix(&p.height, sizeof(p.height));
++        mix(&p.zero_out_masked, sizeof(p.zero_out_masked));
++        char name[40];
++        snprintf(name, sizeof(name), "/%016llx.cond", static_cast<unsigned long long>(h));
++        return std::string(dir) + name;
++    }
++
++    static bool crossattn_only(const SDCondition& c) {
++        SDCondition rest = c;
++        rest.c_crossattn = sd::Tensor<float>();
++        rest.extra_c_crossattns.clear();
++        return rest.empty() && rest.c_ref_images.empty() && rest.c_ref_audios.empty() && rest.c_image_embeds.empty();
++    }
++
++    static void write_tensor(std::ofstream& f, const sd::Tensor<float>& t) {
++        int64_t nd = static_cast<int64_t>(t.shape().size());
++        f.write(reinterpret_cast<const char*>(&nd), sizeof(nd));
++        f.write(reinterpret_cast<const char*>(t.shape().data()), sizeof(int64_t) * nd);
++        f.write(reinterpret_cast<const char*>(t.data()), sizeof(float) * t.values().size());
++    }
++
++    static bool read_tensor(std::ifstream& f, sd::Tensor<float>& out) {
++        int64_t nd = 0;
++        if (!f.read(reinterpret_cast<char*>(&nd), sizeof(nd)) || nd < 0 || nd > 8) {
++            return false;
++        }
++        std::vector<int64_t> shape(nd);
++        int64_t n = 1;
++        if (nd > 0 && !f.read(reinterpret_cast<char*>(shape.data()), sizeof(int64_t) * nd)) {
++            return false;
++        }
++        for (auto d : shape) {
++            n *= d;
++        }
++        std::vector<float> data(static_cast<size_t>(n));
++        if (!f.read(reinterpret_cast<char*>(data.data()), sizeof(float) * data.size())) {
++            return false;
++        }
++        out = sd::Tensor<float>(shape, std::move(data));
++        return true;
++    }
++
++    static bool load_from_disk(const std::string& path, SDCondition& out) {
++        std::ifstream f(path, std::ios::binary);
++        int64_t magic = 0, extra = 0;
++        if (!f || !f.read(reinterpret_cast<char*>(&magic), sizeof(magic)) || magic != 0x31434453 ||
++            !f.read(reinterpret_cast<char*>(&extra), sizeof(extra)) || extra < 0 || extra > 16 || !read_tensor(f, out.c_crossattn)) {
++            return false;
++        }
++        for (int64_t i = 0; i < extra; i++) {
++            sd::Tensor<float> t;
++            if (!read_tensor(f, t)) {
++                return false;
++            }
++            out.extra_c_crossattns.push_back(std::move(t));
++        }
++        return true;
++    }
++
++    static void save_to_disk(const std::string& path, const SDCondition& c) {
++        if (!crossattn_only(c) || c.c_crossattn.empty()) {
++            LOG_INFO("conditioning disk cache skipped: not a plain cross-attention condition");
++            return;
++        }
++        std::ofstream f(path + ".tmp", std::ios::binary);
++        int64_t magic = 0x31434453, extra = static_cast<int64_t>(c.extra_c_crossattns.size());
++        f.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
++        f.write(reinterpret_cast<const char*>(&extra), sizeof(extra));
++        write_tensor(f, c.c_crossattn);
++        for (const auto& t : c.extra_c_crossattns) {
++            write_tensor(f, t);
++        }
++        f.close();
++        if (f.fail() || std::rename((path + ".tmp").c_str(), path.c_str()) != 0) {
++            std::remove((path + ".tmp").c_str());
++        }
++    }
++
+ public:
+     void set_capacity(size_t capacity) {
+         capacity_ = capacity;
+@@ -84,7 +184,17 @@ public:
+ 
+     SDCondition get(Conditioner& conditioner, int n_threads, const ConditionerParams& params) {
+         if (capacity_ == 0) {
+-            return conditioner.get_learned_condition(n_threads, params);
++            const std::string disk = disk_path(params);
++            SDCondition condition;
++            if (!disk.empty() && load_from_disk(disk, condition) && !condition.empty()) {
++                LOG_INFO("conditioning disk cache hit");
++                return condition;
++            }
++            condition = conditioner.get_learned_condition(n_threads, params);
++            if (!condition.empty() && !disk.empty()) {
++                save_to_disk(disk, condition);
++            }
++            return condition;
+         }
+         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+             if (same_params(it->params, params)) {
+@@ -93,7 +203,16 @@ public:
+                 return entries_.front().condition;
+             }
+         }
+-        auto condition = conditioner.get_learned_condition(n_threads, params);
++        const std::string disk = disk_path(params);
++        SDCondition condition;
++        if (!disk.empty() && load_from_disk(disk, condition) && !condition.empty()) {
++            LOG_INFO("conditioning disk cache hit");
++        } else {
++            condition = conditioner.get_learned_condition(n_threads, params);
++            if (!condition.empty() && !disk.empty()) {
++                save_to_disk(disk, condition);
++            }
++        }
+         if (!condition.empty()) {
+             if (entries_.size() == capacity_) {
+                 entries_.pop_back();
 diff --git a/src/core/ggml_extend.cpp b/src/core/ggml_extend.cpp
 index 1099f4b..eccef99 100644
 --- a/src/core/ggml_extend.cpp
@@ -454,6 +610,54 @@ index a414d96..c9b2db1 100644
  
              ggml_build_forward_expand(gf, out);
              return gf;
+diff --git a/src/model/diffusion/ltxv.hpp b/src/model/diffusion/ltxv.hpp
+index 17b882c..8b398b5 100644
+--- a/src/model/diffusion/ltxv.hpp
++++ b/src/model/diffusion/ltxv.hpp
+@@ -727,7 +727,6 @@ namespace LTXV {
+                 gates               = ggml_reshape_4d(ctx->ggml_ctx, gates, 1, heads, gate_logits->ne[1], gate_logits->ne[2]);
+ 
+                 auto out4 = ggml_reshape_4d(ctx->ggml_ctx, out, dim_head, heads, out->ne[1], out->ne[2]);
+-                gates     = ggml_repeat(ctx->ggml_ctx, gates, out4);
+                 out4      = ggml_mul(ctx->ggml_ctx, out4, gates);
+                 out       = ggml_reshape_3d(ctx->ggml_ctx, out4, heads * dim_head, out4->ne[2], out4->ne[3]);
+             }
+@@ -778,10 +777,7 @@ namespace LTXV {
+             int64_t coeff = cross_attention_adaln ? 9 : 6;
+             auto t        = ggml_reshape_3d(ctx->ggml_ctx, timestep, dim, coeff, batch);
+             auto s        = ggml_reshape_3d(ctx->ggml_ctx, table, dim, coeff, 1);
+-            auto e        = ggml_new_tensor_3d(ctx->ggml_ctx, timestep->type, dim, coeff, batch);
+-            s             = ggml_repeat(ctx->ggml_ctx, s, e);
+-            t             = ggml_repeat(ctx->ggml_ctx, t, e);
+-            auto out      = ggml_add(ctx->ggml_ctx, s, t);
++            auto out      = ggml_add(ctx->ggml_ctx, t, s);
+             return ggml_ext_chunk(ctx->ggml_ctx, out, static_cast<int>(coeff), 1);
+         }
+ 
+@@ -792,10 +788,7 @@ namespace LTXV {
+ 
+             auto t   = ggml_reshape_3d(ctx->ggml_ctx, prompt_timestep, dim, 2, batch);
+             auto s   = ggml_reshape_3d(ctx->ggml_ctx, table, dim, 2, 1);
+-            auto e   = ggml_new_tensor_3d(ctx->ggml_ctx, prompt_timestep->type, dim, 2, batch);
+-            s        = ggml_repeat(ctx->ggml_ctx, s, e);
+-            t        = ggml_repeat(ctx->ggml_ctx, t, e);
+-            auto out = ggml_add(ctx->ggml_ctx, s, t);
++            auto out = ggml_add(ctx->ggml_ctx, t, s);
+             return ggml_ext_chunk(ctx->ggml_ctx, out, 2, 1);
+         }
+ 
+@@ -1177,10 +1170,7 @@ namespace LTXV {
+             }
+             auto t      = ggml_reshape_3d(ctx->ggml_ctx, timestep, dim, coeff, timestep->ne[1]);
+             auto s      = ggml_reshape_3d(ctx->ggml_ctx, table, dim, coeff, 1);
+-            auto e      = ggml_new_tensor_3d(ctx->ggml_ctx, timestep->type, dim, coeff, timestep->ne[1]);
+-            t           = ggml_repeat(ctx->ggml_ctx, t, e);
+-            s           = ggml_repeat(ctx->ggml_ctx, s, e);
+-            auto out    = ggml_add(ctx->ggml_ctx, s, t);
++            auto out    = ggml_add(ctx->ggml_ctx, t, s);
+             auto chunks = ggml_ext_chunk(ctx->ggml_ctx, out, static_cast<int>(coeff), 1);
+             return std::vector<ggml_tensor*>(chunks.begin() + start, chunks.begin() + start + count);
+         }
 diff --git a/src/model/vae/tae.hpp b/src/model/vae/tae.hpp
 index a0700ca..aa73959 100644
 --- a/src/model/vae/tae.hpp
@@ -658,14 +862,25 @@ index f37c4dd..a90e82a 100644
  
      // record the positions of underscores that should NOT be replaced
 diff --git a/src/pipeline/video.cpp b/src/pipeline/video.cpp
-index 9aef07b..c5ef530 100644
+index 9aef07b..c7eca4f 100644
 --- a/src/pipeline/video.cpp
 +++ b/src/pipeline/video.cpp
-@@ -1979,6 +1979,9 @@ namespace sd::pipeline {
+@@ -772,7 +772,9 @@ namespace sd::pipeline {
+         }
+ 
+         if (sd_version_is_ltxav(sd->version)) {
+-            latents.audio_length = get_ltxav_num_audio_latents(request->frames, request->fps);
++            // SD_LTX_NO_AUDIO=1: video only; the audio stream of the transformer is skipped (run_ax) and no audio is decoded
++            const bool no_audio  = std::getenv("SD_LTX_NO_AUDIO") != nullptr;
++            latents.audio_length = no_audio ? 0 : get_ltxav_num_audio_latents(request->frames, request->fps);
+             latents.audio_latent = make_ltxav_empty_audio_latent(latents.audio_length);
+         }
+ 
+@@ -1979,6 +1981,9 @@ namespace sd::pipeline {
              free_sd_audio(generated_audio);
              return false;
          }
-+        if (!latent_upscale_enabled && sd->model_manager != nullptr && std::getenv("SD_FREE_DIFFUSION_BEFORE_DECODE") != nullptr) {
++        if (sd->model_manager != nullptr && std::getenv("SD_FREE_DIFFUSION_BEFORE_DECODE") != nullptr) {
 +            sd->model_manager->release_component_params(ModelComponent::Diffusion);
 +        }
          auto result = decode_video_outputs(sd, latent_upscale_enabled ? hires_request : request, final_latent, num_frames_out);

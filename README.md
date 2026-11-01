@@ -38,7 +38,7 @@ Time per image with the model already in memory (UI or `sd-server`), RyzenAdj po
 | SDXL + DMD2 | 1024×1536 | ~1:02 |
 | Qwen-Image 2.1 Turbo (Q5_K_S), 8 steps | 512×768 | ~3.5 min |
 | Kromoss (MOSS-Image 5B, Q6_K) + DMD2 LoRA, 4 steps | 512×768 | ~2 min |
-| LTX-2.5 22B (video with audio, distilled Q2_K_XL), 8 steps | 384×256, 9 frames | ~4 min; 512×768 × 9 frames ~8 min with the `SD_FREE_DIFFUSION_BEFORE_DECODE=1` patch, see [docs/ltx-experiments.md](docs/ltx-experiments.md) |
+| LTX-2.5 22B (video with audio, distilled Q2_K_XL), 8 steps | 384×256, 9 frames | 3 min; 512×768 × 17 frames ~6.7 min (two-stage, no audio, sd.cpp patch), see [docs/ltx-experiments.md](docs/ltx-experiments.md) |
 | Wan 2.2 TI2V 5B Turbo (Q4_K_M), 4 steps, 33 frames | 512×768 | ~4:15 |
 | Upscale ×2 (realesr-animevideov3) | 512×768 → 1024×1536 | ~1.6 s |
 
