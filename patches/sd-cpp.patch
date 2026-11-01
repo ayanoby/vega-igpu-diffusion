@@ -532,7 +532,7 @@ index 6b94bcb..9b53f87 100644
              if (w->ne[2] == 1 && x->ne[2] == 1 && x->ne[3] == in_channels) {
                  // One frame through a one-frame-deep kernel is a 2D conv; backends without
 diff --git a/src/model_manager.cpp b/src/model_manager.cpp
-index 243811d..7fc440f 100644
+index 243811d..cd42eef 100644
 --- a/src/model_manager.cpp
 +++ b/src/model_manager.cpp
 @@ -11,6 +11,26 @@
@@ -595,6 +595,56 @@ index 243811d..7fc440f 100644
          if (state->compute_backend == nullptr) {
              LOG_ERROR("model manager compute backend is null for lora target tensor '%s'", state->name.c_str());
              return false;
+@@ -1323,6 +1362,34 @@ void ModelManager::release_all() {
+     release_params_storage_blocks(true);
+ }
+ 
++void ModelManager::release_component_params(ModelComponent component) {
++    clear_all_prefetched_params();
++    std::unordered_set<TensorState*> targets;
++    for (const auto& state : tensor_states_) {
++        if (state != nullptr && state->component == component && state->pin_count == 0) {
++            targets.insert(state.get());
++        }
++    }
++    release_compute_staging_blocks(false, &targets);
++    size_t bytes = 0;
++    for (auto it = params_storage_blocks_.begin(); it != params_storage_blocks_.end();) {
++        ParamsStorageBlock* block = it->get();
++        const bool all_target     = std::all_of(block->states.begin(), block->states.end(), [&](TensorState* state) {
++            return state == nullptr || (targets.count(state) != 0 && !state->staged_to_compute_backend);
++        });
++        if (all_target) {
++            if (block->buffer != nullptr) {
++                bytes += ggml_backend_buffer_get_size(block->buffer);
++            }
++            free_params_storage_block(*block);
++            it = params_storage_blocks_.erase(it);
++        } else {
++            ++it;
++        }
++    }
++    LOG_INFO("released %.2f MB of component params", bytes / (1024.f * 1024.f));
++}
++
+ ggml_tensor* ModelManager::resolve_param_tensor(ggml_tensor* tensor) const {
+     for (auto* current = tensor; current != nullptr; current = current->view_src) {
+         if (tensor_states_by_tensor_.count(current) != 0)
+diff --git a/src/model_manager.h b/src/model_manager.h
+index fdb1108..a307aa3 100644
+--- a/src/model_manager.h
++++ b/src/model_manager.h
+@@ -179,6 +179,10 @@ private:
+ public:
+     ~ModelManager() override;
+ 
++    // Frees the parameter buffers of one component (e.g. the diffusion model after sampling, before the VAE needs the
++    // memory). Tensors are reloaded from their files if the component is used again.
++    void release_component_params(ModelComponent component);
++
+     const ModelLoader& loader() const { return model_loader_; }
+ 
+     bool set_loader(ModelLoader loader);
 diff --git a/src/name_conversion.cpp b/src/name_conversion.cpp
 index f37c4dd..a90e82a 100644
 --- a/src/name_conversion.cpp
@@ -607,3 +657,17 @@ index f37c4dd..a90e82a 100644
      };
  
      // record the positions of underscores that should NOT be replaced
+diff --git a/src/pipeline/video.cpp b/src/pipeline/video.cpp
+index 9aef07b..c5ef530 100644
+--- a/src/pipeline/video.cpp
++++ b/src/pipeline/video.cpp
+@@ -1979,6 +1979,9 @@ namespace sd::pipeline {
+             free_sd_audio(generated_audio);
+             return false;
+         }
++        if (!latent_upscale_enabled && sd->model_manager != nullptr && std::getenv("SD_FREE_DIFFUSION_BEFORE_DECODE") != nullptr) {
++            sd->model_manager->release_component_params(ModelComponent::Diffusion);
++        }
+         auto result = decode_video_outputs(sd, latent_upscale_enabled ? hires_request : request, final_latent, num_frames_out);
+         LOG_DEBUG("decode_video_outputs returned %s", result == nullptr ? "nullptr (failed)" : "frames");
+         if (result == nullptr) {
